@@ -17,6 +17,8 @@
 
 from __future__ import print_function
 
+import tempfile
+import legion_spy
 import argparse
 import sys, os, shutil
 import string, re, json, heapq, time, itertools
@@ -2245,8 +2247,30 @@ class State(object):
                 stats_tsv_file.write("%.2f\t%.2f\n" % stat_point)
             stats_tsv_file.close()
 
+    def get_legion_spy_data(self, file_names):
+        spy_state = legion_spy.State(False, True, True, True)
+
+        total_matches = 0
+
+        for file_name in file_names:
+            total_matches += spy_state.parse_log_file(file_name)
+        print('Matched %d lines across all files.' % total_matches)
+        spy_state.post_parse(True, True)
+
+        print("Performing logical analysis...")
+        spy_state.perform_logical_analysis(False, False)
+        spy_state.perform_physical_analysis(False, False)
+        spy_state.simplify_physical_graph(need_cycle_check=False)
+
+        # temp_dir = tempfile.mkdtemp()+'/'
+        # spy_state.make_dataflow_graphs(temp_dir, True)
+        # spy_state.make_event_graph(temp_dir)
+
+
+
+
     def emit_interactive_visualization(self, output_dirname, show_procs,
-                                       show_channels, show_instances, force):
+                               file_names, show_channels, show_instances, force):
         self.assign_colors()
         # the output directory will either be overwritten, or we will find
         # a new unique name to create new logs
@@ -2260,6 +2284,9 @@ class State(object):
         src_directory = os.path.join(dirname(sys.argv[0]), "legion_prof_files")
 
         shutil.copytree(src_directory, output_dirname)
+
+        self.get_legion_spy_data(file_names)
+
 
         proc_list = []
         chan_list = []
@@ -2446,7 +2473,7 @@ def main():
 
         if interactive_timeline:
             state.emit_interactive_visualization(output_dirname, show_procs,
-                                 show_channels, show_instances, force)
+                                 file_names, show_channels, show_instances, force)
         if show_copy_matrix:
             state.show_copy_matrix(copy_output_prefix)
 
