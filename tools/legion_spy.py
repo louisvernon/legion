@@ -4926,7 +4926,7 @@ class Operation(object):
         self.task = None
         self.task_id = -1
         self.index_owner = None
-        # Only valid for index tasks
+        # Only valid for index operations 
         self.points = None
         self.launch_rect = None
         # Only valid for internal operations (e.g. open, close, advance)
@@ -5125,7 +5125,6 @@ class Operation(object):
         self.partition_kind = kind
 
     def set_index_owner(self, owner):
-        assert owner.kind == INDEX_TASK_KIND
         assert not self.index_owner
         self.index_owner = owner
 
@@ -5144,6 +5143,17 @@ class Operation(object):
             self.points[index_point] = point
         if self.context is not None:
             self.points[index_point].op.set_context(self.context, False)
+
+    def add_point_op(self, op, point):
+        op.kind = self.kind
+        op.set_index_owner(self)
+        # Initialize if necessary
+        if self.points is None:
+            self.points = dict()
+        assert point not in self.points
+        self.points[point] = op
+        if self.context is not None:
+            op.set_context(self.context, False)
 
     def add_requirement(self, requirement):
         if self.reqs is None:
@@ -5700,6 +5710,9 @@ class Operation(object):
     def perform_logical_analysis(self, perform_checks):
         # We need a context to do this
         assert self.context is not None
+        # If this operation was predicated false, then there is nothing to do
+        if self.predicate and not self.predicate_result:
+            return True
         # See if there is a fence in place for this context
         if self.context.current_fence is not None:
             if perform_checks:
@@ -6087,6 +6100,12 @@ class Operation(object):
         self.get_physical_reachable(self.reachable_cache, False)
         # Handle special cases
         if self.kind == COPY_OP_KIND:
+            # Check to see if this is an index copy
+            if self.points:
+                for point in sorted(self.points.itervalues(), key=lambda x: x.uid):
+                    if not point.perform_op_physical_verification(perform_checks):
+                        return False
+                return True
             # Compute our version numbers first
             self.compute_current_version_numbers()
             num_reqs = len(self.reqs)
@@ -6097,6 +6116,12 @@ class Operation(object):
                         idx+num_copies, self.reqs[idx+num_copies], perform_checks):
                     return False
         elif self.kind == FILL_OP_KIND:
+            # Check to see if this is an index fill
+            if self.points:
+                for point in sorted(self.points.itervalues(), key=lambda x: x.uid):
+                  if not point.perform_op_physical_verification(perform_checks):
+                      return False
+                return True
             # Compute our version numbers first
             self.compute_current_version_numbers()
             for index,req in self.reqs.iteritems():
@@ -6279,11 +6304,15 @@ class Operation(object):
                 close.print_event_graph(printer, elevate, all_nodes, False)
         # Handle index space operations specially, everything
         # else is the same
-        if self.kind is INDEX_TASK_KIND:
+        if self.kind is INDEX_TASK_KIND or self.points:
             # Might have been predicated
             if self.points:
-                for point in self.points.itervalues():
-                    point.op.print_event_graph(printer, elevate, all_nodes, False)
+                if self.kind is INDEX_TASK_KIND:
+                    for point in self.points.itervalues():
+                        point.op.print_event_graph(printer, elevate, all_nodes, False)
+                else:
+                    for point in self.points.itervalues():
+                        point.print_event_graph(printer, elevate, all_nodes, False)
             # Put any operations we generated in the elevate set
             if self.realm_copies:
                 for copy in self.realm_copies:
@@ -8557,6 +8586,9 @@ slice_point_pat          = re.compile(
            "(?P<val1>\-?[0-9]+) (?P<val2>\-?[0-9]+) (?P<val3>\-?[0-9]+)")
 point_point_pat          = re.compile(
     prefix+"Point Point (?P<point1>[0-9]+) (?P<point2>[0-9]+)")
+index_point_pat          = re.compile(
+    prefix+"Index Point (?P<index>[0-9]+) (?P<point>[0-9]+) (?P<dim>[0-9]+) "+
+           "(?P<val1>\-?[0-9]+) (?P<val2>\-?[0-9]+) (?P<val3>\-?[0-9]+)")
 op_index_pat             = re.compile(
     prefix+"Operation Index (?P<parent>[0-9]+) (?P<index>[0-9]+) (?P<child>[0-9]+)")
 close_index_pat          = re.compile(
@@ -9302,6 +9334,19 @@ def parse_legion_spy_line(line, state):
         assert p2 not in state.point_point
         # Holdoff on doing the merge until after parsing
         state.point_point[p1] = p2
+        return True
+    m = index_point_pat.match(line)
+    if m is not None:
+        point = state.get_operation(int(m.group('point')))
+        dim = int(m.group('dim'))
+        index_point = Point(dim)
+        index_point.vals[0] = int(m.group('val1'))
+        if dim > 1:
+            index_point.vals[1] = int(m.group('val2'))
+            if dim > 2:
+                index_point.vals[2] = int(m.group('val3'))
+        index = state.get_operation(int(m.group('index')))
+        index.add_point_op(point, index_point) 
         return True
     m = op_index_pat.match(line)
     if m is not None:

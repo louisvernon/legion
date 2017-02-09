@@ -773,6 +773,7 @@ namespace Legion {
                       bool check_privileges);
       void activate_copy(void);
       void deactivate_copy(void);
+      void log_copy_requirements(void) const;
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -886,7 +887,6 @@ namespace Legion {
       std::vector<ProjectionInfo>   src_projection_infos;
       std::vector<ProjectionInfo>   dst_projection_infos;
     protected:
-      Domain                        point_domain;
       std::vector<PointCopyOp*>     points;
       unsigned                      points_committed;
       bool                          commit_request;
@@ -930,7 +930,6 @@ namespace Legion {
       virtual const DomainPoint& get_domain_point(void) const;
       virtual void set_projection_result(unsigned idx,LogicalRegion result);
     protected:
-      DomainPoint               point;
       IndexCopyOp*              owner;
     };
 
@@ -2288,6 +2287,7 @@ namespace Legion {
       void check_fill_privilege(void);
       void compute_parent_index(void);
       ApEvent compute_sync_precondition(void) const;
+      void log_fill_requirement(void) const;
     public:
       RegionTreePath privilege_path;
       VersionInfo version_info;
@@ -2334,7 +2334,6 @@ namespace Legion {
     public:
       ProjectionInfo                projection_info;
     protected:
-      Domain                        point_domain;
       std::vector<PointFillOp*>     points;
       unsigned                      points_committed;
       bool                          commit_request;
@@ -2369,7 +2368,6 @@ namespace Legion {
       virtual const DomainPoint& get_domain_point(void) const;
       virtual void set_projection_result(unsigned idx,LogicalRegion result);
     protected:
-      DomainPoint               point;
       IndexFillOp*              owner;
     };
 
