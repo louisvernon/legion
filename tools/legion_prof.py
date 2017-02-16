@@ -283,8 +283,13 @@ class TaskRange(TimeRange):
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         title = repr(self.task)
         initiation = ''
+
+        op_id = ''
         if self.task.is_meta:
             initiation = str(self.task.op.op_id)
+        elif self.task.is_task:
+            op_id = self.task.get_opid()
+
         if not self.task.is_task:
             color = self.task.color or "#555555"
         else:
@@ -293,29 +298,29 @@ class TaskRange(TimeRange):
             start_time = self.start_time
             cur_level = base_level + (max_levels - level)
             for wait_interval in self.task.wait_intervals:
-                tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\n" % \
+                tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\t%s\n" % \
                         (cur_level,
                          start_time,
-                         wait_interval.start, color, title, initiation))
-                tsv_file.write("%d\t%ld\t%ld\t%s\t0.15\t%s\t%s\n" % \
+                         wait_interval.start, color, title, initiation, op_id))
+                tsv_file.write("%d\t%ld\t%ld\t%s\t0.15\t%s\t%s\t%s\n" % \
                         (cur_level,
                          wait_interval.start,
-                         wait_interval.ready, color, title, initiation))
-                tsv_file.write("%d\t%ld\t%ld\t%s\t0.45\t%s\t%s\n" % \
+                         wait_interval.ready, color, title, initiation, op_id))
+                tsv_file.write("%d\t%ld\t%ld\t%s\t0.45\t%s\t%s\t%s\n" % \
                         (cur_level,
                          wait_interval.ready,
-                         wait_interval.end, color, title, initiation))
+                         wait_interval.end, color, title, initiation, op_id))
                 start_time = max(start_time, wait_interval.end)
             if start_time < self.stop_time:
-                tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\n" % \
+                tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\t%s\n" % \
                         (cur_level,
                          start_time,
-                         self.stop_time, color, title, initiation))
+                         self.stop_time, color, title, initiation, op_id))
         else:
-            tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\n" % \
+            tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\t%s\n" % \
                     (base_level + (max_levels - level),
                      self.start_time, self.stop_time,
-                     color,title,initiation))
+                     color,title,initiation, op_id))
         for subrange in self.subranges:
             subrange.emit_tsv(tsv_file, base_level, max_levels, level + 1)
 
@@ -500,6 +505,7 @@ class Processor(object):
         self.time_points = list()
 
     def add_task(self, task):
+        task.proc = self
         self.tasks.append(TaskRange(task))
 
     def add_message(self, message):
@@ -954,6 +960,7 @@ class Operation(object):
         self.color = None
         self.wait_intervals = list()
         self.owner = None
+        self.proc = None
 
     def add_wait_interval(self, start, ready, end):
         self.wait_intervals.append(WaitInterval(start, ready, end))
@@ -974,6 +981,12 @@ class Operation(object):
     def get_color(self):
         assert self.color is not None
         return self.color
+
+    def get_opid(self):
+        if self.is_proftask:
+            return ""
+        else:
+            return self.op_id
 
     def get_info(self):
         info = '<'+str(self.op_id)+">"
@@ -1077,17 +1090,17 @@ class Copy(object):
         return self.op.get_color()
 
     def __repr__(self):
-        return 'Copy size='+str(self.size) + '\t' + str(self.op.op_id)
+        return 'Copy size='+str(self.size) + '\t' + str(self.op.get_opid())
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         assert self.level is not None
         assert self.start is not None
         assert self.stop is not None
         copy_name = repr(self)
-        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\n" % \
+        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%d\n" % \
                 (base_level + (max_levels - level),
                 self.start, self.stop,
-                self.get_color(), copy_name))
+                self.get_color(), copy_name, self.op.get_opid()))
 
 class Fill(object):
     def __init__(self, dst, op):
@@ -1102,14 +1115,14 @@ class Fill(object):
         return self.op.get_color()
 
     def __repr__(self):
-        return 'Fill\t' + str(self.op.op_id)
+        return 'Fill\t' + str(self.op.get_opid())
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         fill_name = repr(self)
-        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\n" % \
+        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%d\n" % \
                 (base_level + (max_levels - self.level),
                 self.start, self.stop,
-                self.get_color(), fill_name))
+                self.get_color(), fill_name, self.op.get_opid()))
 
 class Instance(object):
     def __init__(self, inst_id, op):
@@ -1126,10 +1139,10 @@ class Instance(object):
         assert self.create is not None
         assert self.destroy is not None
         inst_name = repr(self)
-        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\n" % \
+        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%d\n" % \
                 (base_level + (max_levels - level),
                  self.create, self.destroy,
-                 self.get_color(), inst_name))
+                 self.get_color(), inst_name, self.op.get_opid()))
 
 
     def get_color(self):
@@ -2255,6 +2268,36 @@ class State(object):
         for file_name in file_names:
             total_matches += spy_state.parse_log_file(file_name)
         print('Matched %d lines across all files.' % total_matches)
+        op_map = {}
+
+        for _slice, index in spy_state.slice_index.iteritems():
+            while _slice in spy_state.slice_slice:
+                _slice = spy_state.slice_slice[_slice]
+            if index.uid not in op_map:
+                op_map[index.uid] = {"in": set(), "out": set()}
+            if _slice not in op_map:
+                op_map[_slice] = {"in": set(), "out": set()}
+            op_map[index.uid]["out"].add(_slice)
+            op_map[_slice]["in"].add(index.uid)
+
+        for _slice1, _slice2 in spy_state.slice_slice.iteritems():
+            if _slice1 not in op_map:
+                op_map[_slice1] = {"in": set(), "out": set()}
+            if _slice2 not in op_map:
+                op_map[_slice2] = {"in": set(), "out": set()}
+            op_map[_slice1]["out"].add(_slice2)
+            op_map[_slice2]["in"].add(_slice1)
+
+        for point, _slice in spy_state.point_slice.iteritems():
+            while _slice in spy_state.slice_slice:
+                _slice = spy_state.slice_slice[_slice]
+            if _slice not in op_map:
+                op_map[_slice] = {"in": set(), "out": set()}
+            if point.op.uid not in op_map:
+                op_map[point.op.uid] = {"in": set(), "out": set()}
+            op_map[_slice]["out"].add(point.op.uid)
+            op_map[point.op.uid]["in"].add(_slice)
+
         spy_state.post_parse(True, True)
 
         print("Performing logical analysis...")
@@ -2262,11 +2305,23 @@ class State(object):
         spy_state.perform_physical_analysis(False, False)
         spy_state.simplify_physical_graph(need_cycle_check=False)
 
-        # temp_dir = tempfile.mkdtemp()+'/'
-        # spy_state.make_dataflow_graphs(temp_dir, True)
-        # spy_state.make_event_graph(temp_dir)
+        op = spy_state.get_operation(spy_state.top_level_uid)
+        elevate = dict()
+        all_nodes = set()
+        printer = legion_spy.GraphPrinter("./", "temp")
+        op.print_event_graph(printer, elevate, all_nodes, True) 
+        # Now print the edges at the very end
+        for node in all_nodes:
+            for src in node.physical_incoming:
+                if src.uid not in op_map:
+                    op_map[src.uid] = {"in" : set(), "out" : set()}
+                if node.uid not in op_map:
+                    op_map[node.uid] = {"in" : set(), "out" : set()}
+                op_map[src.uid]["in"].add(node.uid)
+                op_map[node.uid]["out"].add(src.uid)
 
 
+        return op_map
 
 
     def emit_interactive_visualization(self, output_dirname, show_procs,
@@ -2285,7 +2340,8 @@ class State(object):
 
         shutil.copytree(src_directory, output_dirname)
 
-        self.get_legion_spy_data(file_names)
+        op_map = self.get_legion_spy_data(file_names)
+        print(op_map)
 
 
         proc_list = []
@@ -2302,7 +2358,7 @@ class State(object):
         processor_tsv_file_name = os.path.join(output_dirname, "legion_prof_processor.tsv")
         scale_json_file_name = os.path.join(output_dirname, "json", "scale.json")
 
-        data_tsv_header = "level\tstart\tend\tcolor\topacity\ttitle\tinitiation\n"
+        data_tsv_header = "level\tstart\tend\tcolor\topacity\ttitle\tinitiation\n\tuid"
 
         data_tsv_file = open(data_tsv_file_name, "w")
         data_tsv_file.write(data_tsv_header)
@@ -2359,9 +2415,17 @@ class State(object):
         data_tsv_file.close()
 
         ops_file = open(ops_file_name, "w")
-        ops_file.write("op_id\toperation\n")
+        ops_file.write("op_id\toperation\ttime\tproc_id\n")
         for op_id, operation in self.operations.iteritems():
-            ops_file.write("\t".join(map(str, [op_id, operation])) + "\n")
+            time = 0
+            proc_id = ""
+            if (operation.start is not None) and (operation.stop is not None):
+                time = (operation.stop - operation.start) / 2 
+            if (operation.proc is not None):
+                proc_id = hex(operation.proc.proc_id)
+            ops_file.write("%d\t%s\t%d\t%s\n" % \
+                            (op_id, str(operation), 
+                             time, proc_id))
         ops_file.close()
 
         processor_tsv_file = open(processor_tsv_file_name, "w")
