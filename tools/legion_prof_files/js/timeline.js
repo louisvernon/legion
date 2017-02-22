@@ -781,7 +781,7 @@ function drawLayout() {
                           .attr("r", 8);
   var expand_icons = expand_group.append("path");
   var arc = d3.svg.symbol().type('triangle-down')
-            .size(6);
+            .size(12);
 
 
     //.attr("transform", function(elem) {
@@ -803,7 +803,7 @@ function drawLayout() {
   expand_group.each(function(elem) {
     var path = d3.select(this);
     var x = elem.depth * 15 + 5;
-    var y = lineLevelCalculator(elem) - 2;
+    var y = lineLevelCalculator(elem) - 3;
 
     if (elem.expanded) {
       path.attr("transform", "translate(" + x + ", " + y + ") rotate(0)");
