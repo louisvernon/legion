@@ -261,6 +261,10 @@ class TaskRange(TimeRange):
         TimeRange.__init__(self, task.start, task.stop)
         self.task = task
 
+    def set_level(self, level):
+        self.level = level
+        self.task.level = level
+
     def emit_svg(self, printer, level):
         if self.task.is_task:
             assert self.task.is_task
@@ -376,6 +380,10 @@ class MessageRange(TimeRange):
         TimeRange.__init__(self, message.start, message.stop)
         self.message = message
 
+    def set_level(self, level):
+        self.level = level
+        self.message.level = level
+
     def emit_svg(self, printer, level):
         title = repr(self.message)
         title += (' '+self.message.get_timing())
@@ -416,6 +424,10 @@ class MapperCallRange(TimeRange):
         TimeRange.__init__(self, call.start, call.stop)
         self.call = call 
 
+    def set_level(self, level):
+        self.level = level
+        self.call.level = level
+
     def emit_svg(self, printer, level):
         title = repr(self.call)
         title += (' '+self.call.get_timing())
@@ -455,6 +467,10 @@ class RuntimeCallRange(TimeRange):
     def __init__(self, call):
         TimeRange.__init__(self, call.start, call.stop)
         self.call = call 
+
+    def set_level(self, level):
+        self.level = level
+        self.call.level = level
 
     def emit_svg(self, printer, level):
         title = repr(self.call)
@@ -533,11 +549,11 @@ class Processor(object):
         for point in self.time_points:
             if point.first:
                 if free_levels:
-                    point.thing.level = min(free_levels)
+                    point.thing.set_level(min(free_levels))
                     free_levels.remove(point.thing.level)
                 else:
                     self.max_levels += 1
-                    point.thing.level = self.max_levels
+                    point.thing.set_level(self.max_levels)
             else:
                 free_levels.add(point.thing.level)
 
@@ -556,7 +572,9 @@ class Processor(object):
         # iterate over tasks in start time order
         for point in self.time_points:
             if point.first:
-                point.thing.emit_tsv(tsv_file, base_level, self.max_levels + 1, point.thing.level)
+                point.thing.emit_tsv(tsv_file, base_level,
+                                     self.max_levels + 1,
+                                     point.thing.level)
         return base_level + max(self.max_levels, 1) + 1
 
     def print_stats(self):
@@ -2260,7 +2278,47 @@ class State(object):
                 stats_tsv_file.write("%.2f\t%.2f\n" % stat_point)
             stats_tsv_file.close()
 
-    def get_legion_spy_data(self, file_names):
+    def simplify_op(self, op_dependencies, op_existance_map, transitive_map, op_path, _dir):
+        cur_op_id = op_path[-1]
+
+        if op_existance_map[cur_op_id]:
+            # we're done, we've found an op that exists
+            for op_id in op_path:
+                # for the children that exist, add it to the transitive map
+                if not op_id in transitive_map[_dir]:
+                    transitive_map[_dir][op_id] = []
+                transitive_map[_dir][op_id].append(cur_op_id)
+        else:
+            children = op_dependencies[cur_op_id][_dir]
+            for child_op_id in children:
+                new_op_path = op_path + [child_op_id]
+                self.simplify_op(op_dependencies, op_existance_map, transitive_map,
+                                 new_op_path, _dir)
+
+    def simplify_op_dependencies(self, op_dependencies, op_existance_map):
+        transitive_map = {"in": {}, "out": {}}
+
+        for _dir in ["in", "out"]:
+            for op_id in op_dependencies.iterkeys():
+                if not op_id in transitive_map[_dir]:
+                    self.simplify_op(op_dependencies, op_existance_map, transitive_map,
+                                     [op_id], _dir)
+
+        for op_id in op_dependencies.iterkeys():
+            for _dir in ["in", "out"]:
+                if len(op_dependencies[op_id][_dir]) > 0:
+                    # replace each op with the transitive map
+                    transformed_dependencies = [transitive_map[_dir][op] 
+                                                if op in transitive_map[_dir] else []
+                                                for op in op_dependencies[op_id][_dir]]
+                    # flatMap
+                    simplified_depedencies = reduce(list.__add__, transformed_dependencies)
+                    op_dependencies[op_id][_dir] = simplified_depedencies
+                else:
+                    op_dependencies[op_id][_dir] = []
+        return op_dependencies
+
+    def get_op_dependencies(self, file_names):
         spy_state = legion_spy.State(False, True, True, True)
 
         total_matches = 0
@@ -2268,35 +2326,35 @@ class State(object):
         for file_name in file_names:
             total_matches += spy_state.parse_log_file(file_name)
         print('Matched %d lines across all files.' % total_matches)
-        op_map = {}
+        op_dependencies = {}
 
         for _slice, index in spy_state.slice_index.iteritems():
             while _slice in spy_state.slice_slice:
                 _slice = spy_state.slice_slice[_slice]
-            if index.uid not in op_map:
-                op_map[index.uid] = {"in": set(), "out": set()}
-            if _slice not in op_map:
-                op_map[_slice] = {"in": set(), "out": set()}
-            op_map[index.uid]["out"].add(_slice)
-            op_map[_slice]["in"].add(index.uid)
+            if index.uid not in op_dependencies:
+                op_dependencies[index.uid] = {"in": set(), "out": set()}
+            if _slice not in op_dependencies:
+                op_dependencies[_slice] = {"in": set(), "out": set()}
+            op_dependencies[index.uid]["out"].add(_slice)
+            op_dependencies[_slice]["in"].add(index.uid)
 
         for _slice1, _slice2 in spy_state.slice_slice.iteritems():
-            if _slice1 not in op_map:
-                op_map[_slice1] = {"in": set(), "out": set()}
-            if _slice2 not in op_map:
-                op_map[_slice2] = {"in": set(), "out": set()}
-            op_map[_slice1]["out"].add(_slice2)
-            op_map[_slice2]["in"].add(_slice1)
+            if _slice1 not in op_dependencies:
+                op_dependencies[_slice1] = {"in": set(), "out": set()}
+            if _slice2 not in op_dependencies:
+                op_dependencies[_slice2] = {"in": set(), "out": set()}
+            op_dependencies[_slice1]["out"].add(_slice2)
+            op_dependencies[_slice2]["in"].add(_slice1)
 
         for point, _slice in spy_state.point_slice.iteritems():
             while _slice in spy_state.slice_slice:
                 _slice = spy_state.slice_slice[_slice]
-            if _slice not in op_map:
-                op_map[_slice] = {"in": set(), "out": set()}
-            if point.op.uid not in op_map:
-                op_map[point.op.uid] = {"in": set(), "out": set()}
-            op_map[_slice]["out"].add(point.op.uid)
-            op_map[point.op.uid]["in"].add(_slice)
+            if _slice not in op_dependencies:
+                op_dependencies[_slice] = {"in": set(), "out": set()}
+            if point.op.uid not in op_dependencies:
+                op_dependencies[point.op.uid] = {"in": set(), "out": set()}
+            op_dependencies[_slice]["out"].add(point.op.uid)
+            op_dependencies[point.op.uid]["in"].add(_slice)
 
         spy_state.post_parse(True, True)
 
@@ -2313,15 +2371,28 @@ class State(object):
         # Now print the edges at the very end
         for node in all_nodes:
             for src in node.physical_incoming:
-                if src.uid not in op_map:
-                    op_map[src.uid] = {"in" : set(), "out" : set()}
-                if node.uid not in op_map:
-                    op_map[node.uid] = {"in" : set(), "out" : set()}
-                op_map[src.uid]["in"].add(node.uid)
-                op_map[node.uid]["out"].add(src.uid)
+                if src.uid not in op_dependencies:
+                    op_dependencies[src.uid] = {"in" : set(), "out" : set()}
+                if node.uid not in op_dependencies:
+                    op_dependencies[node.uid] = {"in" : set(), "out" : set()}
+                op_dependencies[src.uid]["in"].add(node.uid)
+                op_dependencies[node.uid]["out"].add(src.uid)
+
+        op_existance_map = {}
+
+        for op_id, operation in self.operations.iteritems():
+            op_existance_map[op_id] = operation.proc is not None
 
 
-        return op_map
+        op_dependencies = self.simplify_op_dependencies(op_dependencies, op_existance_map)
+        #op_dependencies = self.simplify_op_dependencies(op_dependencies, op_existance_map)
+
+        # now convert from set to list
+        # for op_id in op_dependencies.iterkeys():
+        #     for dep_dir in op_dependencies[op_id].iterkeys():
+        #         op_dependencies[op_id][dep_dir] = list(op_dependencies[uid][dep_dir])
+
+        return op_dependencies
 
 
     def emit_interactive_visualization(self, output_dirname, show_procs,
@@ -2329,9 +2400,9 @@ class State(object):
         self.assign_colors()
         # the output directory will either be overwritten, or we will find
         # a new unique name to create new logs
-        if force:
-            if (exists(output_dirname)):
-                shutil.rmtree(output_dirname)
+        if force and exists(output_dirname):
+            print("forcing removal of " + output_dirname)
+            shutil.rmtree(output_dirname)
         else:
             output_dirname = self.find_unique_dirname(output_dirname)
 
@@ -2340,8 +2411,6 @@ class State(object):
 
         shutil.copytree(src_directory, output_dirname)
 
-        op_map = self.get_legion_spy_data(file_names)
-        print(op_map)
 
 
         proc_list = []
@@ -2353,17 +2422,27 @@ class State(object):
         base_level = 0
         last_time = 0
 
-        ops_file_name = os.path.join(output_dirname, "legion_prof_ops.tsv")
-        data_tsv_file_name = os.path.join(output_dirname, "legion_prof_data.tsv")
-        processor_tsv_file_name = os.path.join(output_dirname, "legion_prof_processor.tsv")
-        scale_json_file_name = os.path.join(output_dirname, "json", "scale.json")
+        ops_file_name = os.path.join(output_dirname, 
+                                     "legion_prof_ops.tsv")
+        data_tsv_file_name = os.path.join(output_dirname, 
+                                          "legion_prof_data.tsv")
+        processor_tsv_file_name = os.path.join(output_dirname, 
+                                               "legion_prof_processor.tsv")
+        scale_json_file_name = os.path.join(output_dirname, "json", 
+                                            "scale.json")
+        dep_json_file_name = os.path.join(output_dirname, "json", 
+                                          "op_dependencies.json")
 
-        data_tsv_header = "level\tstart\tend\tcolor\topacity\ttitle\tinitiation\n\tuid"
+        data_tsv_header = "level\tstart\tend\tcolor\topacity\ttitle\tinitiation\tuid\n"
 
         data_tsv_file = open(data_tsv_file_name, "w")
         data_tsv_file.write(data_tsv_header)
         tsv_dir = os.path.join(output_dirname, "tsv")
+        json_dir = os.path.join(output_dirname, "json")
         os.mkdir(tsv_dir)
+        if not exists(json_dir):
+            os.mkdir(json_dir)
+        
         if show_procs:
             for p,proc in sorted(self.processors.iteritems(), key=lambda x: x[1]):
                 if len(proc.tasks) > 0:
@@ -2415,17 +2494,19 @@ class State(object):
         data_tsv_file.close()
 
         ops_file = open(ops_file_name, "w")
-        ops_file.write("op_id\toperation\ttime\tproc_id\n")
+        ops_file.write("op_id\tdesc\ttime\tproc\tlevel\n")
         for op_id, operation in self.operations.iteritems():
             time = 0
-            proc_id = ""
+            proc = ""
+            level = ""
             if (operation.start is not None) and (operation.stop is not None):
-                time = (operation.stop - operation.start) / 2 
+                time = operation.start + ((operation.stop - operation.start) / 2)
             if (operation.proc is not None):
-                proc_id = hex(operation.proc.proc_id)
-            ops_file.write("%d\t%s\t%d\t%s\n" % \
-                            (op_id, str(operation), 
-                             time, proc_id))
+                proc = repr(operation.proc)
+                level = str(operation.level+1)
+            ops_file.write("%d\t%s\t%d\t%s\t%s\n" % \
+                            (op_id, str(operation),
+                             time, proc, level))
         ops_file.close()
 
         processor_tsv_file = open(processor_tsv_file_name, "w")
@@ -2449,8 +2530,6 @@ class State(object):
                 processor_tsv_file.write("%s\t%s\t%d\n" % 
                                 (repr(memory), tsv, levels))
         processor_tsv_file.close()
-        if not os.path.exists(os.path.join(output_dirname, "json")):
-            os.makedirs(os.path.join(output_dirname, "json"))
 
         num_stats = self.emit_statistics_tsv(output_dirname)
         stats_levels = 4
@@ -2464,6 +2543,11 @@ class State(object):
 
         with open(scale_json_file_name, "w") as scale_json_file:
             json.dump(scale_data, scale_json_file)
+
+        op_dependencies = self.get_op_dependencies(file_names)
+
+        with open(dep_json_file_name, "w") as dep_json_file:
+            json.dump(op_dependencies, dep_json_file)
 
 
 def main():

@@ -1,3 +1,4 @@
+// Some of the constants are read in from load_scale_json
 var constants = {
   margin_left: 310,
   margin_right: 50,
@@ -11,6 +12,9 @@ var constants = {
   line_colors: ["limegreen", "crimson", "goldenrod", "sienna", "orangered",
                 "palevioletred", "olivedrab", "cornflowerblue"]
 }
+
+var op_dependencies = {};
+var base_map = {};
 
 // Contains the children for each stats file
 var stats_files = {};
@@ -187,8 +191,6 @@ function getLineColor(elem) {
   return colorMap[kind];
 }
 
-
-
 function drawStats() {
   // TODO: Add to state
   var windowStart = $("#timeline").scrollLeft();
@@ -209,7 +211,6 @@ function drawStats() {
   var paths = state.timelineSvg.selectAll("path")
     .data(filteredStatsData);
 
-  var focus = state.timelineSvg.select("g.focus");
   paths.enter().append("path")
     .attr("class", "line")
     .attr("d", function (d) { return statsline(d.data); })
@@ -222,8 +223,7 @@ function drawStats() {
     .attr("stroke", getLineColor)
     .on("mouseover", function() { 
         var focus = state.timelineSvg.append("g")
-          .attr("class", "focus")
-          .style("display", null);
+          .attr("class", "focus");
 
         var text = focus.append("text")
           .attr("x", 7)
@@ -232,13 +232,13 @@ function drawStats() {
           .attr("dy", ".35em");
 
         focus.append("circle")
-        .attr("fill", "none")
-        .attr("stroke", "black")
-        .attr("r", 4.5);
+          .attr("fill", "none")
+          .attr("stroke", "black")
+          .attr("r", 4.5);
 
         var rect = focus.insert("rect", "text")
-            .style("fill", "#222")
-            .style("opacity", "0.7");
+          .style("fill", "#222")
+          .style("opacity", "0.7");
     })
     .on("mouseout", function() {
       state.timelineSvg.select("g.focus").remove();
@@ -325,6 +325,9 @@ function hideLoaderIcon() {
   }
 }
 
+
+
+
 function getMouseOver() {
   var paneWidth = $("#timeline").width();
   var left = paneWidth / 3;
@@ -336,11 +339,16 @@ function getMouseOver() {
     var anchor = relativeX < left ? "start" :
                  relativeX < right ? "middle" : "end";
     var descView = state.timelineSvg.append("g").attr("id", "desc");
+    var uid = d.uid;
+
+    if (op_dependencies[uid]) {
+      d3.select(this).style("cursor", "pointer")
+    }
 
     var total = d.end - d.start;
     var initiation = "";
     if ((d.initiation != undefined) && d.initiation != "") {
-      initiation = " initiated by " + state.operations[d.initiation];
+      initiation = " initiated by " + state.operations[d.initiation].desc;
     } 
     var title = d.title + initiation + ", total=" + total + "us, start=" + 
                 d.start + "us, end=" + d.end+ "us";
@@ -535,7 +543,59 @@ function drawTimeline() {
       else return 0.05;
     })
     .on("mouseout", function(d, i) { 
+      if (op_dependencies[d.uid]) {
+        d3.select(this).style("cursor", "default");
+      }
       state.timelineSvg.selectAll("#desc").remove();
+    })
+    .on("mousedown", function(d) {
+      if (op_dependencies[d.uid]) {
+        state.timelineSvg.select("g.dependencies").remove();
+      var depGroup = state.timelineSvg.append("g")
+            .attr("class", "dependencies");
+
+        var startTime = (d.end - d.start) / 2 + d.start;
+        var startX = convertToPos(state, startTime);
+        var startY = dependencyLineLevelCalculator(d.level);
+
+        // TODO: draw line here instead
+        var deps = op_dependencies[d.uid];
+        for(var dir in deps) {
+          var deps_dir = deps[dir];
+          for(var i = 0; i < deps_dir.length; i++) {
+            var endOp = state.operations[deps_dir[i]];
+            console.log("op:", endOp);
+            var endX = convertToPos(state, endOp.time);
+            var endBase = +base_map[endOp.proc];
+            // create a dummy element so we can reuse timelineLevelCalculator
+            var endLevel = endBase + (+endOp.level);
+            var endY = dependencyLineLevelCalculator(endLevel);
+            depGroup.append("line")
+              .style("stroke", "black")
+              .attr("x1", startX)
+              .attr("y1", startY)
+              .attr("x2", endX)
+              .attr("y2", endY)
+              .style("stroke-width", "2px");
+
+            depGroup.append("circle")
+              .attr("cx", endX)
+              .attr("cy", endY)
+              .attr("fill", "white")
+              .attr("stroke", "black")
+              .attr("r", 2.5)
+              .style("stroke-width", "2px");
+          }
+        }
+        depGroup.append("circle")
+          .attr("cx", startX)
+          .attr("cy", startY)
+          .attr("fill", "white")
+          .attr("stroke", "black")
+          .attr("r", 2.5)
+          .style("stroke-width", "2px");
+
+      }
     });
 
   drawStats();
@@ -572,6 +632,7 @@ function calculateBases() {
   var base = 0;
   state.flattenedLayoutData.forEach(function(elem) {
     elem.base = base;
+    base_map[elem.text] = base;
     if (elem.visible) {
       if (elem.enabled) {
         base += elem.num_levels;
@@ -621,13 +682,7 @@ function collapseHandler(d, index) {
     var elem = state.flattenedLayoutData[index];
     elem.loader(elem); // will redraw the timeline once loaded
   } else {
-    // if collapsing, unexpand
-    // if (!d.enabled && d.expanded) {
-    //   expandHandler(d, index);
-    // } else {
-      // redraw the timeline
-      redraw();
-    //}
+    redraw();
   }
 }
 
@@ -651,6 +706,10 @@ function statsLevelCalculator(timelineElement) {
 function timelineLevelCalculator(timelineEvent) {  
   return constants.margin_top + timelineEvent.level * state.thickness;
 };
+
+function dependencyLineLevelCalculator(level) {
+  return constants.margin_top + (level+0.5) * state.thickness;
+}
 
 function drawLayout() {
   
@@ -1189,7 +1248,8 @@ function load_proc_timeline(proc) {
                 color: d.color,
                 opacity: d.opacity,
                 initiation: d.initiation,
-                title: d.title
+                title: d.title,
+                uid: d.uid
             };
         }
     },
@@ -1256,7 +1316,7 @@ function load_ops_and_timeline() {
     },
     function(data) { 
       data.forEach(function(d) {
-        state.operations[parseInt(d.op_id)] = d.operation;      
+        state.operations[parseInt(d.op_id)] = d;
       });
       // initTimelineElements depends on the ops to be loaded
       initTimelineElements();
@@ -1283,7 +1343,6 @@ function load_procs(callback) {
 
         base += 2;
       });
-      //console.log(data);
       state.processors = data;
       calculateLayout();
 
@@ -1292,11 +1351,6 @@ function load_procs(callback) {
       calculateBases();
       drawLayout();
       callback();
-
-      //stats_counter = stats_files.length; // TODO: use ES6 Promises
-      //stats_files.forEach(function(stats_filename) {
-      //  load_stats(stats_filename, callback);
-      //});
     }
   );
 }
@@ -1427,8 +1481,6 @@ function mousemove(timelineElem) {
 
 }
 
-var maxVal;
-
 // Get the data
 function load_stats(elem) {
   var stats_file = elem.tsv;
@@ -1450,27 +1502,6 @@ function load_stats(elem) {
     },
     function(error, data) {
       state.statsData[stats_file] = data;
-
-      // state.statsData = filterStatsData(data);
-      // Scale the range of the data
-      //state.x.domain(d3.extent(data, function(d) { return d.time; }));
-      //state.y.domain([0, 1]);
-      //state.y.domain([0, d3.max(data, function(d) { return d.count; })]);
-
-      // Loop through each symbol / key
-      //state.timelineSvg.append("path")
-      //  .attr("class", "line")
-      //  .attr("id", function(d) { return stats_file; })
-      //  .attr("d", statsline(state.statsData)); 
-
-      //var focus = state.timelineSvg.select("g.focus");
-
-      //state.timelineSvg.select("path.line")
-      //  .on("mouseover", function() { focus.style("display", null); })
-      //  .on("mouseout", function() { focus.style("display", "none"); })
-      //  .on("mousemove", mousemove);
-      //console.log("loaded", stats_file);
-
       elem.loaded = true;
       hideLoaderIcon();
       redraw();
@@ -1538,6 +1569,7 @@ function load_stats_json(callback) {
 // of a stats view
 function load_scale_json(callback) {
   $.getJSON("json/scale.json", function(json) {
+    // add the read-in constants
     $.each(json, function(key, val) {
       constants[key] = val;
     });
@@ -1545,8 +1577,15 @@ function load_scale_json(callback) {
   });
 }
 
+function load_op_deps_json(callback) {
+  $.getJSON("json/op_dependencies.json", function(json) {
+    op_dependencies = json;
+    load_scale_json(callback);
+  });
+}
+
 function load_jsons(callback) {
-  load_scale_json(callback);
+  load_op_deps_json(callback);
 }
 
 function main() {
