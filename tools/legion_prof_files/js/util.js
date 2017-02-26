@@ -228,7 +228,8 @@ function filterAndMergeBlocks(state) {
                 end: end,
                 color: "#808080",
                 title: count + " merged tasks",
-                uid: d.uid
+                in: d.in,
+                out: d.out
               });
               i += (count - 1);
             } else {
@@ -241,7 +242,8 @@ function filterAndMergeBlocks(state) {
                 color: d.color,
                 initiation: d.initiation,
                 title: d.title + " (expanded for visibility)",
-                uid: d.uid
+                in: d.in,
+                out: d.out
               });
             }
           } else {
@@ -256,7 +258,8 @@ function filterAndMergeBlocks(state) {
               opacity: d.opacity,
               initiation: d.initiation,
               title: d.title,
-              uid: d.uid
+              in: d.in,
+              out: d.out
             });
           }
         }

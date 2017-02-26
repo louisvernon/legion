@@ -326,8 +326,6 @@ function hideLoaderIcon() {
 }
 
 
-
-
 function getMouseOver() {
   var paneWidth = $("#timeline").width();
   var left = paneWidth / 3;
@@ -339,9 +337,8 @@ function getMouseOver() {
     var anchor = relativeX < left ? "start" :
                  relativeX < right ? "middle" : "end";
     var descView = state.timelineSvg.append("g").attr("id", "desc");
-    var uid = d.uid;
 
-    if (op_dependencies[uid]) {
+    if ((d.in.length != 0) || (d.out.length != 0)) {
       d3.select(this).style("cursor", "pointer")
     }
 
@@ -508,6 +505,65 @@ function calculateLayout() {
   });
 }
 
+function timelineEventMouseDown(timelineEvent) {
+  var hasDependencies = ((timelineEvent.in.length != 0) || 
+                         (timelineEvent.out.length != 0));
+
+  if (hasDependencies) {
+    state.timelineSvg.select("g.dependencies").remove();
+    var depGroup = state.timelineSvg.append("g")
+        .attr("class", "dependencies");
+
+    var startTime = (timelineEvent.end - timelineEvent.start) / 2 
+                    + timelineEvent.start;
+    var startX = convertToPos(state, startTime);
+    var startY = dependencyLineLevelCalculator(timelineEvent.level);
+
+    var deps = [];
+    if (hasDependencies) {
+      timelineEvent.in.concat(timelineEvent.out).forEach(function(dep) {
+        deps.push({
+          base: +base_map[dep[0] + "," + dep[1]], // set in calculateBases
+          level: +dep[2],
+          time: +dep[3]
+        });
+      });
+    }
+    console.log("deps", deps);
+    for(var i = 0; i < deps.length; i++) {
+      var dep = deps[i];
+      var endX = convertToPos(state, dep.time);
+      var endBase = +dep.base
+      // create a dummy element so we can reuse timelineLevelCalculator
+      var endLevel = endBase + (+dep.level);
+      var endY = dependencyLineLevelCalculator(endLevel);
+      console.log("endLevel:" + endLevel + " endY: " + endY);
+      depGroup.append("line")
+        .style("stroke", "black")
+        .attr("x1", startX)
+        .attr("y1", startY)
+        .attr("x2", endX)
+        .attr("y2", endY)
+        .style("stroke-width", "1px");
+
+      depGroup.append("circle")
+        .attr("cx", endX)
+        .attr("cy", endY)
+        .attr("fill", "white")
+        .attr("stroke", "black")
+        .attr("r", 2.5)
+        .style("stroke-width", "1px");
+    }
+    depGroup.append("circle")
+      .attr("cx", startX)
+      .attr("cy", startY)
+      .attr("fill", "white")
+      .attr("stroke", "black")
+      .attr("r", 2.5)
+      .style("stroke-width", "1px");
+  }
+}
+
 function drawTimeline() {
   showLoaderIcon()
 
@@ -543,60 +599,12 @@ function drawTimeline() {
       else return 0.05;
     })
     .on("mouseout", function(d, i) { 
-      if (op_dependencies[d.uid]) {
+      if ((d.in.length != 0) || (d.out.length != 0)) {
         d3.select(this).style("cursor", "default");
       }
       state.timelineSvg.selectAll("#desc").remove();
     })
-    .on("mousedown", function(d) {
-      if (op_dependencies[d.uid]) {
-        state.timelineSvg.select("g.dependencies").remove();
-      var depGroup = state.timelineSvg.append("g")
-            .attr("class", "dependencies");
-
-        var startTime = (d.end - d.start) / 2 + d.start;
-        var startX = convertToPos(state, startTime);
-        var startY = dependencyLineLevelCalculator(d.level);
-
-        // TODO: draw line here instead
-        var deps = op_dependencies[d.uid];
-        for(var dir in deps) {
-          var deps_dir = deps[dir];
-          for(var i = 0; i < deps_dir.length; i++) {
-            var endOp = state.operations[deps_dir[i]];
-            console.log("op:", endOp);
-            var endX = convertToPos(state, endOp.time);
-            var endBase = +base_map[endOp.proc];
-            // create a dummy element so we can reuse timelineLevelCalculator
-            var endLevel = endBase + (+endOp.level);
-            var endY = dependencyLineLevelCalculator(endLevel);
-            depGroup.append("line")
-              .style("stroke", "black")
-              .attr("x1", startX)
-              .attr("y1", startY)
-              .attr("x2", endX)
-              .attr("y2", endY)
-              .style("stroke-width", "2px");
-
-            depGroup.append("circle")
-              .attr("cx", endX)
-              .attr("cy", endY)
-              .attr("fill", "white")
-              .attr("stroke", "black")
-              .attr("r", 2.5)
-              .style("stroke-width", "2px");
-          }
-        }
-        depGroup.append("circle")
-          .attr("cx", startX)
-          .attr("cy", startY)
-          .attr("fill", "white")
-          .attr("stroke", "black")
-          .attr("r", 2.5)
-          .style("stroke-width", "2px");
-
-      }
-    });
+    .on("mousedown", timelineEventMouseDown);
 
   drawStats();
   timeline.on("mouseover", mouseOver);
@@ -628,11 +636,43 @@ function calculateVisibileLevels() {
   return levels;
 }
 
+function get_node_id(text) {
+  // PROCESSOR:   tag:8 = 0x1d, owner_node:16,   (unused):28, proc_idx: 12
+  var proc_regex = /Processor 0x1d([a-fA-f0-9]{4})/;
+  var proc_match = proc_regex.exec(text);
+  // if there's only one node, then per-node graphs are redundant
+  if (proc_match) {
+    var node_id = parseInt(proc_match[1], 16);
+    return node_id
+  }
+}
+
+function get_proc_in_node(text) {
+  // PROCESSOR:   tag:8 = 0x1d, owner_node:16,   (unused):28, proc_idx: 12
+  var proc_regex = /Processor 0x1d[a-fA-f0-9]{11}([a-fA-f0-9]{3})/;
+    0x1d00000000000001
+  var proc_match = proc_regex.exec(text);
+  // if there's only one node, then per-node graphs are redundant
+  if (proc_match) {
+    console.log("match");
+    var proc_in_node = parseInt(proc_match[1], 16);
+    return proc_in_node;
+  }
+}
+
 function calculateBases() {
   var base = 0;
   state.flattenedLayoutData.forEach(function(elem) {
     elem.base = base;
-    base_map[elem.text] = base;
+    var node_id = get_node_id(elem.text);
+    var proc_in_node = get_proc_in_node(elem.text);
+    console.log(elem.text);
+    console.log(node_id);
+    console.log(proc_in_node);
+    if (node_id != undefined && proc_in_node != undefined) {
+      base_map[(+node_id) + "," + (+proc_in_node)] = +base;
+      console.log(elem, base);
+    }
     if (elem.visible) {
       if (elem.enabled) {
         base += elem.num_levels;
@@ -708,7 +748,7 @@ function timelineLevelCalculator(timelineEvent) {
 };
 
 function dependencyLineLevelCalculator(level) {
-  return constants.margin_top + (level+0.5) * state.thickness;
+  return constants.margin_top + ((level+0.5) * state.thickness);
 }
 
 function drawLayout() {
@@ -1246,6 +1286,8 @@ function load_proc_timeline(proc) {
         var start = +d.start;
         var end = +d.end;
         var total = end - start;
+        var _in = d.in === "" ? [] : JSON.parse(d.in)
+        var out = d.out === "" ? [] : JSON.parse(d.out)
         if (total > state.resolution) {
             return {
                 id: i,
@@ -1256,7 +1298,8 @@ function load_proc_timeline(proc) {
                 opacity: d.opacity,
                 initiation: d.initiation,
                 title: d.title,
-                uid: d.uid
+                in: _in,
+                out: out
             };
         }
     },
@@ -1592,7 +1635,7 @@ function load_op_deps_json(callback) {
 }
 
 function load_jsons(callback) {
-  load_op_deps_json(callback);
+  load_scale_json(callback);
 }
 
 function main() {
