@@ -51,7 +51,7 @@ local emergency = std.config["emergency-gc"]
 local function manual_gc() end
 
 if emergency then
-  local emergency_threshold = 600 * 1024
+  local emergency_threshold = 1024 * 1024
   -- Manually call GC whenever the current heap size exceeds threshold
   manual_gc = function()
     if collectgarbage("count") >= emergency_threshold then
@@ -1978,6 +1978,10 @@ function codegen.expr_index_access(cx, node)
         local region = value:read(cx)
         local region_type = std.as_read(node.expr_type)
 
+        if cx:has_region_or_list(region_type) then
+          return values.value(node, region, region_type)
+        end
+
         if std.is_region(region_type) then
           -- FIXME: For the moment, iterators, allocators, and physical
           -- regions are inaccessible since we assume lists are always
@@ -2832,7 +2836,7 @@ function codegen.expr_call(cx, node)
           expr_type = value_type,
           annotations = node.annotations,
           span = node.span,
-        })
+        }):read(cx)
       local actions = quote
         [value.actions]
         c.legion_future_destroy(future)
@@ -4798,28 +4802,28 @@ function codegen.expr_dynamic_collective_get_result(cx, node)
   end
 end
 
-local function expr_advance_phase_barrier(cx, value, value_type)
+local function expr_advance_phase_barrier(runtime, context, value, value_type)
   if std.is_phase_barrier(value_type) then
     return quote end, `(value_type {
       impl = c.legion_phase_barrier_advance(
-        [cx.runtime], [cx.context], [value].impl),
+        [runtime], [context], [value].impl),
     })
   elseif std.is_dynamic_collective(value_type) then
     return quote end, `(value_type {
       impl = c.legion_dynamic_collective_advance(
-        [cx.runtime], [cx.context], [value].impl),
+        [runtime], [context], [value].impl),
     })
   else
     assert(false)
   end
 end
 
-local function expr_advance_list(cx, value, value_type)
+local function expr_advance_list_body(runtime, context, value, value_type)
   if std.is_list(value_type) then
     local result = terralib.newsymbol(value_type, "result")
     local element = terralib.newsymbol(value_type.element_type, "element")
-    local inner_actions, inner_value = expr_advance_list(
-      cx, element, value_type.element_type)
+    local inner_actions, inner_value = expr_advance_list_body(
+      runtime, context, element, value_type.element_type)
     local actions = quote
       var data = c.malloc(
         terralib.sizeof([value_type.element_type]) * [value].__size)
@@ -4836,7 +4840,35 @@ local function expr_advance_list(cx, value, value_type)
     end
     return actions, result
   else
-    return expr_advance_phase_barrier(cx, value, value_type)
+    return expr_advance_phase_barrier(runtime, context, value, value_type)
+  end
+end
+
+local expr_advance_list_helper = terralib.memoize(
+  function (value_type)
+    local runtime = terralib.newsymbol(c.legion_runtime_t, "runtime")
+    local context = terralib.newsymbol(c.legion_context_t, "context")
+    local value = terralib.newsymbol(value_type, "value")
+    local result_actions, result =
+      expr_advance_list_body(runtime, context, value, value_type)
+    local terra advance_barriers([runtime], [context], [value])
+      [result_actions]
+      return [result]
+    end
+    advance_barriers:setinlined(false)
+    return advance_barriers
+  end)
+
+function expr_advance_list(cx, value, value_type)
+  if std.is_list(value_type) then
+    local helper = expr_advance_list_helper(value_type)
+    local result = terralib.newsymbol(value_type, "result")
+    local actions = quote
+      var [result] = [helper]([cx.runtime], [cx.context], [value])
+    end
+    return actions, result
+  else
+    return expr_advance_phase_barrier(cx.runtime, cx.context, value, value_type)
   end
 end
 
@@ -4858,6 +4890,67 @@ function codegen.expr_advance(cx, node)
   return values.value(
     node,
     expr.once_only(actions, result, expr_type),
+    expr_type)
+end
+
+local function expr_adjust_phase_barrier(cx, barrier, barrier_type,
+                                         value, value_type)
+  if std.is_phase_barrier(barrier_type) then
+    return quote
+      c.legion_phase_barrier_alter_arrival_count(
+        [cx.runtime], [cx.context], [barrier].impl, [value])
+    end
+  elseif std.is_dynamic_collective(barrier_type) then
+    return quote
+      c.legion_dynamic_collective_alter_arrival_count(
+        [cx.runtime], [cx.context], [barrier].impl, [value])
+    end
+  else
+    assert(false)
+  end
+end
+
+local function expr_adjust_list(cx, barrier, barrier_type, value, value_type)
+  if std.is_list(barrier_type) then
+    local result = terralib.newsymbol(barrier_type, "result")
+    local element = terralib.newsymbol(barrier_type.element_type, "element")
+    local inner_actions = expr_adjust_list(
+      cx, element, barrier_type.element_type, value, value_type)
+    local actions = quote
+      for i = 0, [barrier].__size do
+        var [element] = [barrier_type:data(barrier)][i]
+        [inner_actions]
+      end
+    end
+    return actions, result
+  else
+    return expr_adjust_phase_barrier(
+      cx, barrier, barrier_type, value, value_type)
+  end
+end
+
+function codegen.expr_adjust(cx, node)
+  local barrier_type = std.as_read(node.barrier.expr_type)
+  local barrier = codegen.expr(cx, node.barrier):read(cx, barrier_type)
+  local value_type = std.as_read(node.value.expr_type)
+  local value = codegen.expr(cx, node.value):read(cx, value_type)
+  local expr_type = std.as_read(node.expr_type)
+  local actions = quote
+    [barrier.actions];
+    [value.actions];
+    [emit_debuginfo(node)]
+  end
+
+  local result_actions = expr_adjust_list(
+    cx, barrier.value, barrier_type, value.value, value_type)
+  actions = quote
+    [actions];
+    [result_actions]
+  end
+
+  return values.value(
+    node,
+    expr.just(actions, barrier.value),
     expr_type)
 end
 
@@ -6314,6 +6407,9 @@ function codegen.expr(cx, node)
 
   elseif node:is(ast.typed.expr.Advance) then
     return codegen.expr_advance(cx, node)
+
+  elseif node:is(ast.typed.expr.Adjust) then
+    return codegen.expr_adjust(cx, node)
 
   elseif node:is(ast.typed.expr.Arrive) then
     return codegen.expr_arrive(cx, node)
