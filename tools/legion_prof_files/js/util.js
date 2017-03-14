@@ -222,8 +222,8 @@ function filterAndMergeBlocks(state) {
             if (count > 1) {
               state.dataToDraw.push({
                 id: d.id,
-                proc: index,
-                level: d.level + timelineElement.base,
+                proc: timelineElement,
+                level: d.level,
                 start: d.start,
                 end: end,
                 color: "#808080",
@@ -235,8 +235,8 @@ function filterAndMergeBlocks(state) {
             } else {
               state.dataToDraw.push({
                 id: d.id,
-                proc: index,
-                level: d.level + timelineElement.base,
+                proc: timelineElement,
+                level: d.level,
                 start: d.start,
                 end: d.end,
                 color: d.color,
@@ -249,8 +249,8 @@ function filterAndMergeBlocks(state) {
           } else {
             state.dataToDraw.push({
               id: d.id,
-              proc: index,
-              level: d.level + timelineElement.base,
+              proc: timelineElement,
+              level: d.level,
               start: d.start,
               end: d.end,
               opacity: d.opacity,

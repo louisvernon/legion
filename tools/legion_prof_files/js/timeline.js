@@ -15,6 +15,7 @@ var constants = {
 
 var op_dependencies = {};
 var base_map = {};
+var prof_uid_map = {};
 
 // Contains the children for each stats file
 var stats_files = {};
@@ -333,6 +334,7 @@ function getMouseOver() {
   return function(d, i) {
     var p = d3.mouse(this);
     var x = parseFloat(p[0]);
+    var y = timelineLevelCalculator(d) - 5;
     var relativeX = (x - $("#timeline").scrollLeft())
     var anchor = relativeX < left ? "start" :
                  relativeX < right ? "middle" : "end";
@@ -352,7 +354,7 @@ function getMouseOver() {
 
     var text = descView.append("text")
       .attr("x", x)
-      .attr("y", d.level * state.thickness - 5)
+      .attr("y", y)
       .attr("text-anchor", anchor)
       .attr("class", "desc")
       .text(unescape(escape(title)));
@@ -413,18 +415,34 @@ function getProcessors(stats_name) {
 // This function gets a particular timelineElement. It will also handle
 // creating the children for expand commands
 function getElement(depth, text, type, num_levels, loader, 
-                    tsv, children, enabled, visible) {
+                    tsv, _parent, children, enabled, visible) {
+
+  // build the dummy element
+  var element = {
+    depth: depth,
+    enabled: enabled,
+    expanded: false,
+    loaded: false,
+    loader: loader,
+    num_levels: num_levels,
+    children: [],
+    parent: _parent,
+    text: text,
+    type: type,
+    tsv: tsv,
+    visible: visible
+  };
+
   // Create child elements. Child elements will be enabled, but they will be
   // invisible and unloaded. They will be loaded in when expanded
-  var child_elements = [];
   if (children != undefined) {
     children.forEach(function(child) {
       var stats_name = "node " + child;
       var child_element = getElement(depth + 1, stats_name, "stats", 
                                      num_levels, loader,
                                      "tsv/" + child + "_stats.tsv",
-                                     stats_files[child], true, false);
-      child_elements.push(child_element);
+                                     element, stats_files[child], true, false);
+      element.children.push(child_element);
     });
   }
 
@@ -435,25 +453,12 @@ function getElement(depth, text, type, num_levels, loader,
     proc_children.forEach(function(proc_child) {
       var child_element = getElement(depth + 1, proc_child.processor, "proc", 
                                      proc_child.height, load_proc_timeline,
-                                     proc_child.tsv, undefined, true, false);
-      child_elements.push(child_element);
+                                     proc_child.tsv, element, undefined, 
+                                     true, false);
+      element.children.push(child_element);
     });
   }
 
-  // Now that we've gotten the parts, let's build the element and return it
-  var element = {
-    depth: depth,
-    enabled: enabled,
-    expanded: false,
-    loaded: false,
-    loader: loader,
-    num_levels: num_levels,
-    children: child_elements,
-    text: text,
-    type: type,
-    tsv: tsv,
-    visible: visible
-  };
   return element;
 }
 
@@ -471,7 +476,7 @@ function calculateLayout() {
       var kind_element = getElement(0, stats_name, "stats", 
                                      constants.stats_levels, load_stats,
                                      "tsv/" + kind + "_stats.tsv",
-                                     stats_files[kind], false, true);
+                                     undefined, stats_files[kind], false, true);
       state.layoutData.push(kind_element);
     });
   }
@@ -481,7 +486,6 @@ function calculateLayout() {
     // PROCESSOR:   tag:8 = 0x1d, owner_node:16,   (unused):28, proc_idx: 12
     var proc_regex = /Processor 0x1d([a-fA-f0-9]{4})/;
     var proc_match = proc_regex.exec(proc.processor);
-    // if there's only one node, then per-node graphs are redundant
     if (proc_match) {
       var node_id = parseInt(proc_match[1], 16);
       if (!(node_id in seen_nodes)) {
@@ -493,67 +497,69 @@ function calculateLayout() {
           var kind_element = getElement(0, stats_name, "stats", 
                                          constants.stats_levels, load_stats,
                                          "tsv/" + kind + "_stats.tsv",
-                                         stats_files[kind], false, true);
+                                         undefined, stats_files[kind],
+                                         false, true);
           state.layoutData.push(kind_element);
         });
       }
     } else {
       state.layoutData.push(getElement(0, proc.processor, "proc", 
                                        proc.height, load_proc_timeline,
-                                       proc.tsv, undefined, false, true));
+                                       proc.tsv, undefined, undefined,
+                                       false, true));
     }
   });
 }
 
-function timelineEventMouseDown(timelineEvent) {
-  var hasDependencies = ((timelineEvent.in.length != 0) || 
-                         (timelineEvent.out.length != 0));
+function drawDependencies() {
+  state.timelineSvg.select("g.dependencies").remove();
+  var timelineEvent = state.dependencyEvent;
+  if (timelineEvent == undefined || 
+      !timelineEvent.proc.visible || !timelineEvent.proc.enabled) {
+    return; // don't draw in this case, the src isn't present
+  }
+  var startTime = (timelineEvent.end - timelineEvent.start) / 2 
+                  + timelineEvent.start;
+  var startX = convertToPos(state, startTime);
+  var startLevel = timelineEvent.proc.base + timelineEvent.level;
+  var startY = dependencyLineLevelCalculator(startLevel);
+  var depGroup = state.timelineSvg.append("g")
+      .attr("class", "dependencies");
 
-  if (hasDependencies) {
-    state.timelineSvg.select("g.dependencies").remove();
-    var depGroup = state.timelineSvg.append("g")
-        .attr("class", "dependencies");
+  var drewOne = false;
+  timelineEvent.in.concat(timelineEvent.out).forEach(function(dep) {
+    var depProc = base_map[dep[0] + "," + dep[1]]; // set in calculateBases
+    if (depProc.visible && depProc.enabled) {
+      var depElement = prof_uid_map[dep[2]];
+      if (depElement != undefined) {
+        drewOne = true;
+        var level = depElement.level;
+        var time = (depElement.end - depElement.start) / 2 + depElement.start;
+        var endX = convertToPos(state, time);
+        var endBase = +depProc.base
+        // create a dummy element so we can reuse timelineLevelCalculator
+        var endLevel = endBase + level;
+        var endY = dependencyLineLevelCalculator(endLevel);
+        console.log("endLevel:" + endLevel + " endY: " + endY);
+        depGroup.append("line")
+          .style("stroke", "black")
+          .attr("x1", startX)
+          .attr("y1", startY)
+          .attr("x2", endX)
+          .attr("y2", endY)
+          .style("stroke-width", "1px");
 
-    var startTime = (timelineEvent.end - timelineEvent.start) / 2 
-                    + timelineEvent.start;
-    var startX = convertToPos(state, startTime);
-    var startY = dependencyLineLevelCalculator(timelineEvent.level);
-
-    var deps = [];
-    if (hasDependencies) {
-      timelineEvent.in.concat(timelineEvent.out).forEach(function(dep) {
-        deps.push({
-          base: +base_map[dep[0] + "," + dep[1]], // set in calculateBases
-          level: +dep[2],
-          time: +dep[3]
-        });
-      });
+        depGroup.append("circle")
+          .attr("cx", endX)
+          .attr("cy", endY)
+          .attr("fill", "white")
+          .attr("stroke", "black")
+          .attr("r", 2.5)
+          .style("stroke-width", "1px");
+      }
     }
-    console.log("deps", deps);
-    for(var i = 0; i < deps.length; i++) {
-      var dep = deps[i];
-      var endX = convertToPos(state, dep.time);
-      var endBase = +dep.base
-      // create a dummy element so we can reuse timelineLevelCalculator
-      var endLevel = endBase + (+dep.level);
-      var endY = dependencyLineLevelCalculator(endLevel);
-      console.log("endLevel:" + endLevel + " endY: " + endY);
-      depGroup.append("line")
-        .style("stroke", "black")
-        .attr("x1", startX)
-        .attr("y1", startY)
-        .attr("x2", endX)
-        .attr("y2", endY)
-        .style("stroke-width", "1px");
-
-      depGroup.append("circle")
-        .attr("cx", endX)
-        .attr("cy", endY)
-        .attr("fill", "white")
-        .attr("stroke", "black")
-        .attr("r", 2.5)
-        .style("stroke-width", "1px");
-    }
+  });
+  if (drewOne) {
     depGroup.append("circle")
       .attr("cx", startX)
       .attr("cy", startY)
@@ -564,6 +570,31 @@ function timelineEventMouseDown(timelineEvent) {
   }
 }
 
+function timelineEventsExistsAndEqual(a, b) {
+  if (a == undefined || b == undefined) {
+    return false;
+  }
+  return (a.proc.base == b.proc.base) && (a.id == b.id);
+}
+
+function timelineEventMouseDown(timelineEvent) {
+  var hasDependencies = ((timelineEvent.in.length != 0) || 
+                         (timelineEvent.out.length != 0));
+
+  if (hasDependencies) {
+    if (timelineEventsExistsAndEqual(timelineEvent, state.dependencyEvent)) {
+      state.dependencyEvent = undefined;
+    } else {
+      timelineEvent.in.concat(timelineEvent.out).forEach(function(dep) {
+        expandElement(dep[0], dep[1])
+      });
+      
+      state.dependencyEvent = timelineEvent;
+    }
+    redraw();
+  }
+}
+
 function drawTimeline() {
   showLoaderIcon()
 
@@ -571,13 +602,13 @@ function drawTimeline() {
   var timelineGroup = state.timelineSvg.select("g#timeline");
   timelineGroup.selectAll("rect").remove();
   var timeline = timelineGroup.selectAll("rect")
-    .data(state.dataToDraw, function(d) { return d.proc + "-" + d.id; });
+    .data(state.dataToDraw, function(d) { return d.proc.base + "-" + d.id; });
   var mouseOver = getMouseOver();
 
   timeline.enter().append("rect");
 
   timeline
-    .attr("id", function(d) { return "block-" + d.proc + "-" + d.id; })
+    .attr("id", function(d) { return "block-" + d.proc.base + "-" + d.id; })
     .attr("x", function(d) { return convertToPos(state, d.start); })
     .attr("y", timelineLevelCalculator)
     .style("fill", function(d) {
@@ -589,8 +620,20 @@ function drawTimeline() {
     .attr("width", function(d) {
       return Math.max(constants.min_feature_width, convertToPos(state, d.end - d.start));
     })
-    .attr("stroke", "black")
-    .attr("stroke-width", "0.5")
+    .attr("stroke", function(d) {
+      if (timelineEventsExistsAndEqual(d, state.dependencyEvent)) {
+        return "red";
+      } else {
+        return "black";
+      }
+    })
+    .attr("stroke-width", function(d) {
+      if (timelineEventsExistsAndEqual(d, state.dependencyEvent)) {
+        return "1.5";
+      } else {
+        return "0.5";
+      }
+    })
     .attr("height", state.thickness)
     .style("opacity", function(d) {
       if (!state.searchEnabled || searchRegex[currentPos].exec(d.title) != null) {
@@ -619,6 +662,7 @@ function redraw() {
     constants.max_level = calculateVisibileLevels();
     recalculateHeight();
     drawTimeline();
+    drawDependencies();
     drawLayout();
   }
 }
@@ -654,7 +698,6 @@ function get_proc_in_node(text) {
   var proc_match = proc_regex.exec(text);
   // if there's only one node, then per-node graphs are redundant
   if (proc_match) {
-    console.log("match");
     var proc_in_node = parseInt(proc_match[1], 16);
     return proc_in_node;
   }
@@ -666,12 +709,8 @@ function calculateBases() {
     elem.base = base;
     var node_id = get_node_id(elem.text);
     var proc_in_node = get_proc_in_node(elem.text);
-    console.log(elem.text);
-    console.log(node_id);
-    console.log(proc_in_node);
     if (node_id != undefined && proc_in_node != undefined) {
-      base_map[(+node_id) + "," + (+proc_in_node)] = +base;
-      console.log(elem, base);
+      base_map[(+node_id) + "," + (+proc_in_node)] = elem;
     }
     if (elem.visible) {
       if (elem.enabled) {
@@ -700,16 +739,12 @@ function expandHandler(elem, index) {
   } else {
     function collapseChildren(child) {
       child.visible = false;
-      // child.expanded = false;
-      // child.enabled = false;
       child.children.forEach(collapseChildren);
     }
     elem.children.forEach(collapseChildren);
   }
   redraw();
 }
-
-
 
 // This handler is called when you collapse/uncollapse a row in the
 // timeline
@@ -719,12 +754,49 @@ function collapseHandler(d, index) {
   if (!d.loaded) {
     // should always be expanding here
     showLoaderIcon();
-    var elem = state.flattenedLayoutData[index];
-    elem.loader(elem); // will redraw the timeline once loaded
+    //var elem = state.flattenedLayoutData[index];
+    d.loader(d); // will redraw the timeline once loaded
   } else {
     redraw();
   }
 }
+
+// This expands a particular element and its parents if necessary
+function expandElement(node, proc) {
+  // PROCESSOR:   tag:8 = 0x1d, owner_node:16,   (unused):28, proc_idx: 12
+  // ugh why isn't there string formatting
+  var nodeHex = ("0000" + node.toString(16)).slice(-4);
+  var procHex = ("000" + proc.toString(16)).slice(-3);
+  var expectedTitle = "0x1d" + nodeHex + "0000000" + procHex;
+  var matchedElement = undefined;
+  for (var i = 0; i < state.flattenedLayoutData.length; i++) {
+    var timelineElement = state.flattenedLayoutData[i];
+    if (timelineElement.text.indexOf(expectedTitle) !=-1) {  
+      matchedElement = timelineElement;
+      break;
+    }
+  }
+  if (matchedElement != undefined) {
+    var elemPath = []; // path up to parent
+    var curElem = matchedElement;
+    while (curElem != undefined) {
+      elemPath.push(curElem);
+      curElem = curElem.parent;
+    }
+
+    for (var i = elemPath.length - 1; i >= 0; --i) {
+      var elem = elemPath[i];
+      if (!elem.expanded) {
+        expandHandler(elem);
+      }
+      // uncollapse if necessary
+      if ((i == 0) && !elem.enabled) {
+        collapseHandler(elem);
+      }
+    }
+  }
+}
+
 
 function lineLevelCalculator(timelineElement) {
   var level = timelineElement.base + 1;
@@ -744,7 +816,8 @@ function statsLevelCalculator(timelineElement) {
 
 
 function timelineLevelCalculator(timelineEvent) {  
-  return constants.margin_top + timelineEvent.level * state.thickness;
+  return constants.margin_top + 
+         (timelineEvent.proc.base + timelineEvent.level) * state.thickness;
 };
 
 function dependencyLineLevelCalculator(level) {
@@ -1077,6 +1150,7 @@ function adjustZoom(newZoom, scroll) {
     filterAndMergeBlocks(state);
     drawTimeline();
   }
+  drawDependencies();
 }
 
 function recalculateHeight() {
@@ -1299,7 +1373,8 @@ function load_proc_timeline(proc) {
                 initiation: d.initiation,
                 title: d.title,
                 in: _in,
-                out: out
+                out: out,
+                prof_uid: d.prof_uid
             };
         }
     },
@@ -1312,7 +1387,11 @@ function load_proc_timeline(proc) {
         } else {
           state.processorData[proc_name][d.level] = [d];
         }
+        if (d.prof_uid != undefined && d.prof_uid !== "") {
+          prof_uid_map[d.prof_uid] = d;
+        }
       }
+      console.log(prof_uid_map);
       proc.loaded = true;
       hideLoaderIcon();
       redraw();
@@ -1571,6 +1650,7 @@ function initializeState() {
   state.zoom = 1.0;
   state.zoomHistory = Array();
   state.numLoading = 0;
+  state.dependencyEvent = undefined;
 
   state.layoutData = [];
   state.flattenedLayoutData = [];

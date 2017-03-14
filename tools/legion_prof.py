@@ -92,6 +92,15 @@ PIXELS_PER_LEVEL = 40
 # Pixels per tick mark
 PIXELS_PER_TICK = 200
 
+
+# prof_uid counter
+prof_uid_ctr = 0
+
+def get_prof_uid():
+    global prof_uid_ctr
+    prof_uid_ctr += 1
+    return prof_uid_ctr
+
 def slugify(filename):
     # convert spaces to underscores
     slugified = filename.replace(" ", "_")
@@ -113,12 +122,27 @@ def get_simplified_dependencies(op_dependencies, transitive_map, _dir, op_id):
         simplified_dependencies = []
     return simplified_dependencies
 
-def initiation_dependency_helper(op_dependencies, transitive_map, elem, unique_tuple):
+def initiation_dependencies_helper(op_dependencies, transitive_map, elem, unique_tuple):
     if elem.has_op:
         op_id = elem.op.op_id
         if op_id in transitive_map["in"]: # this op exists
             for in_op_id in transitive_map["in"][op_id]:
                 op_dependencies[in_op_id]["out"].add(unique_tuple)
+
+def attach_dependenies_helper(state, op_dependencies, transitive_map, deps, elem):
+    if elem.has_op_id:
+        op_id = elem.op_id
+        if op_id in transitive_map["out"]:
+            deps["out"] += op_dependencies[op_id]["out"]
+        if op_id in transitive_map["in"]:
+            deps["in"] +=  op_dependencies[op_id]["in"]
+    elif elem.has_op:
+        op_id = elem.op.op_id
+        # add the in direction
+        if op_id in transitive_map["in"]:
+            op_tuples = map(lambda op: state.find_op(op).get_unique_tuple(),
+                            transitive_map["in"][op_id])
+            deps["in"] += op_tuples
 
 # Helper function for computing nice colors
 def color_helper(step, num_steps):
@@ -289,6 +313,7 @@ class TaskRange(TimeRange):
         TimeRange.__init__(self, task.start, task.stop)
         self.task = task
         self.deps = {"in": [], "out": []}
+        self.prof_uid = task.prof_uid # the task is what contains the uid
 
     def set_level(self, level):
         self.level = level
@@ -315,31 +340,19 @@ class TaskRange(TimeRange):
 
     def get_unique_tuple(self):
         assert self.task.proc is not None
-        print(self.task.proc)
         time = (self.task.stop - self.task.start) / 2 + self.task.start
         cur_level = self.task.proc.max_levels - self.level
-        return (self.task.proc.node_id, self.task.proc.proc_in_node, cur_level+1, time)
+        return (self.task.proc.node_id, self.task.proc.proc_in_node, self.prof_uid)
 
     def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
-        initiation_dependency_helper(op_dependencies, transitive_map, self.task, self.get_unique_tuple())
+        initiation_dependencies_helper(op_dependencies, transitive_map, self.task, self.get_unique_tuple())
         for subrange in self.subranges:
             subrange.add_initiation_dependencies(state, op_dependencies, transitive_map)
 
     def attach_dependencies(self, state, op_dependencies, transitive_map):
-        if self.task.has_op_id:
-            op_id = self.task.op_id
-            if op_id in transitive_map["out"]:
-                self.deps["out"] += op_dependencies[op_id]["out"]
-            if op_id in transitive_map["in"]:
-                self.deps["in"] +=  op_dependencies[op_id]["in"]
-        elif self.task.has_op:
-            op_id = self.task.op.op_id
-            # add the in direction
-            if op_id in transitive_map["in"]:
-                op_tuples = map(lambda op: state.find_op(op).get_unique_tuple(),
-                                transitive_map["in"][op_id])
-                self.deps["in"] += op_tuples
-                        
+        attach_dependenies_helper(state, op_dependencies, transitive_map,
+                                  self.deps, self.task)
+
         for subrange in self.subranges:
             subrange.attach_dependencies(state, op_dependencies, transitive_map)
 
@@ -369,10 +382,10 @@ class TaskRange(TimeRange):
                         (cur_level, start_time, 
                          wait_interval.start, color, title, initiation,
                          _in, out))
-                tsv_file.write("%d\t%ld\t%ld\t%s\t0.15\t%s\t%s\t%s\t%s\n" % \
+                tsv_file.write("%d\t%ld\t%ld\t%s\t0.15\t%s\t%s\t%s\t%s\t%d\n" % \
                         (cur_level, wait_interval.start,
                          wait_interval.ready, color, title, initiation, 
-                         _in, out))
+                         _in, out, self.prof_uid))
                 tsv_file.write("%d\t%ld\t%ld\t%s\t0.45\t%s\t%s\t%s\t%s\n" % \
                         (cur_level, wait_interval.ready,
                          wait_interval.end, color, title, initiation,
@@ -384,10 +397,10 @@ class TaskRange(TimeRange):
                          self.stop_time, color, title, initiation, 
                          _in, out))
         else:
-            tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\t%s\t%s\n" % \
+            tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\t%s\t%s\t%d\n" % \
                     (base_level + (max_levels - level),
                      self.start_time, self.stop_time,
-                     color,title,initiation, _in, out))
+                     color,title,initiation, _in, out, self.prof_uid))
         for subrange in self.subranges:
             subrange.emit_tsv(tsv_file, base_level, max_levels, level + 1)
 
@@ -494,6 +507,7 @@ class MapperCallRange(TimeRange):
         TimeRange.__init__(self, call.start, call.stop)
         self.call = call 
         self.deps = {"in": [], "out": []}
+        self.prof_uid = call.prof_uid
 
     def set_level(self, level):
         self.level = level
@@ -512,28 +526,17 @@ class MapperCallRange(TimeRange):
         print(self.call.proc)
         time = (self.call.stop - self.call.start) / 2 + self.call.start
         cur_level = self.call.proc.max_levels - self.level
-        return (self.call.proc.node_id, self.call.proc.proc_in_node, cur_level+1, time)
+        return (self.call.proc.node_id, self.call.proc.proc_in_node, self.prof_uid)
 
     def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
-        initiation_dependency_helper(op_dependencies, transitive_map, self.call, self.get_unique_tuple())
+        initiation_dependencies_helper(op_dependencies, transitive_map, self.call, self.get_unique_tuple())
 
         for subrange in self.subranges:
             subrange.add_initiation_dependencies(state, op_dependencies, transitive_map)
 
     def attach_dependencies(self, state, op_dependencies, transitive_map):
-        if self.call.has_op_id:
-            op_id = self.call.op_id
-            if op_id in transitive_map["out"]:
-                self.deps["out"] += op_dependencies[op_id]["out"]
-            if op_id in transitive_map["in"]:
-                self.deps["in"] +=  op_dependencies[op_id]["in"]
-        if self.call.has_op:
-            op_id = self.call.op.op_id
-            # add the in direction
-            if op_id in transitive_map["in"]:
-                op_tuples = map(lambda op: state.find_op(op).get_unique_tuple(),
-                                transitive_map["in"][op_id])
-                self.deps["in"] += op_tuples
+        attach_dependenies_helper(state, op_dependencies, transitive_map,
+                                  self.deps, self.call)
 
         for subrange in self.subranges:
             subrange.attach_dependencies(state, op_dependencies, transitive_map)
@@ -542,10 +545,10 @@ class MapperCallRange(TimeRange):
         title = repr(self.call)
         _in = json.dumps(self.deps["in"]) if len(self.deps["in"]) > 0 else ""
         out = json.dumps(self.deps["out"]) if len(self.deps["out"]) > 0 else ""
-        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\n" % \
+        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\t%d\n" % \
                 (base_level + (max_levels - level),
                  self.start_time, self.stop_time,
-                 self.call.kind.color,title,_in,out))
+                 self.call.kind.color,title,_in,out,self.prof_uid))
         for subrange in self.subranges:
             subrange.emit_tsv(tsv_file, base_level, max_levels, level + 1)
 
@@ -572,6 +575,7 @@ class RuntimeCallRange(TimeRange):
         TimeRange.__init__(self, call.start, call.stop)
         self.call = call 
         self.deps = {"in": [], "out": []}
+        self.prof_uid = call.prof_uid
 
     def set_level(self, level):
         self.level = level
@@ -590,30 +594,17 @@ class RuntimeCallRange(TimeRange):
         print(self.call.proc)
         time = (self.call.stop - self.call.start) / 2 + self.call.start
         cur_level = self.call.proc.max_levels - self.level
-        return (self.call.proc.node_id, self.call.proc.proc_in_node, call_level+1, time)
+        return (self.call.proc.node_id, self.call.proc.proc_in_node, self.prof_uid)
 
     def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
-        initiation_dependency_helper(op_dependencies, transitive_map, self.call, self.get_unique_tuple())
+        initiation_dependencies_helper(op_dependencies, transitive_map, self.call, self.get_unique_tuple())
 
         for subrange in self.subranges:
             subrange.add_initiation_dependencies(state, op_dependencies, transitive_map)
 
     def attach_dependencies(self, state, op_dependencies, transitive_map):
-        if self.call.has_op_id:
-            op_id = self.call.op_id
-
-            if op_id in transitive_map["out"]:
-                self.deps["out"] += op_dependencies[op_id]["out"]
-            if op_id in transitive_map["in"]:
-                self.deps["in"] +=  op_dependencies[op_id]["in"]
-        if self.call.has_op:
-            op_id = self.call.op.op_id
-            # add the in direction
-            if op_id in transitive_map["in"]:
-                op_tuples = map(lambda op: state.find_op(op).get_unique_tuple(),
-                                transitive_map["in"][op_id])
-                self.deps["in"] += op_tuples
-
+        attach_dependenies_helper(state, op_dependencies, transitive_map,
+                                  self.deps, self.call)
 
         for subrange in self.subranges:
             subrange.attach_dependencies(state, op_dependencies, transitive_map)
@@ -622,10 +613,10 @@ class RuntimeCallRange(TimeRange):
         title = repr(self.call)
         _in = json.dumps(self.deps["in"]) if len(self.deps["in"]) > 0 else ""
         out = json.dumps(self.deps["out"]) if len(self.deps["out"]) > 0 else ""
-        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\n" % \
+        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\t%d\n" % \
                 (base_level + (max_levels - level),
                  self.start_time, self.stop_time,
-                 self.call.kind.color,title,_in,out))
+                 self.call.kind.color,title,_in,out,self.prof_uid))
         for subrange in self.subranges:
             subrange.emit_tsv(tsv_file, base_level, max_levels, level + 1)
 
@@ -1138,6 +1129,7 @@ class Operation(object):
         self.color = None
         self.wait_intervals = list()
         self.owner = None
+        self.prof_uid = get_prof_uid()
         self.proc = None
 
     def add_wait_interval(self, start, ready, end):
@@ -1160,7 +1152,7 @@ class Operation(object):
         assert self.proc is not None
         time = (self.stop - self.start) / 2 + self.start
         cur_level = self.proc.max_levels - self.level
-        return (self.proc.node_id, self.proc.proc_in_node, cur_level+1, time)
+        return (self.proc.node_id, self.proc.proc_in_node, self.prof_uid)
 
     def get_color(self):
         assert self.color is not None
@@ -1224,7 +1216,9 @@ class MetaTask(object):
         self.ready = None
         self.start = None
         self.stop = None
+        self.proc = None # set later
         self.wait_intervals = list()
+        self.prof_uid = get_prof_uid()
 
     def add_wait_interval(self, start, ready, end):
         self.wait_intervals.append(WaitInterval(start, ready, end))
@@ -1276,6 +1270,7 @@ class Copy(object):
         self.stop = None
         self.chan = None
         self.deps = {"in": [], "out": []}
+        self.prof_uid = get_prof_uid()
 
     def get_color(self):
         # Get the color from the operation
@@ -1289,26 +1284,14 @@ class Copy(object):
         print(self.chan)
         time = (self.stop - self.start) / 2 + self.start
         cur_level = self.chan.max_live_copies+1 - self.level
-        return (str(self.chan), cur_level+1, time)
+        return (str(self.chan), self.prof_uid)
 
     def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
-        initiation_dependency_helper(op_dependencies, transitive_map, self.get_unique_tuple)
+        initiation_dependencies_helper(op_dependencies, transitive_map, self.get_unique_tuple)
 
     def attach_dependencies(self, state, op_dependencies, transitive_map):
-        if self.has_op_id:
-            op_id = self.op_id
-            if op_id in transitive_map["out"]:
-                self.deps["out"] += op_dependencies[op_id]["out"]
-            if op_id in transitive_map["in"]:
-                self.deps["in"] +=  op_dependencies[op_id]["in"]
-        elif self.has_op:
-            op_id = self.op.op_id
-            # add the in direction
-            if op_id in transitive_map["in"]:
-                op_tuples = map(lambda op: state.find_op(op).get_unique_tuple(),
-                                transitive_map["in"][op_id])
-                self.deps["in"] += op_tuples
-
+        attach_dependenies_helper(state, op_dependencies, transitive_map,
+                                  self.deps, self)
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         assert self.level is not None
@@ -1317,10 +1300,10 @@ class Copy(object):
         copy_name = repr(self)
         _in = json.dumps(self.deps["in"]) if len(self.deps["in"]) > 0 else ""
         out = json.dumps(self.deps["out"]) if len(self.deps["out"]) > 0 else ""
-        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\n" % \
+        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\t%d\n" % \
                 (base_level + (max_levels - level),
                 self.start, self.stop,
-                self.get_color(), copy_name, _in, out))
+                self.get_color(), copy_name, _in, out, self.prof_uid))
 
 class Fill(object):
     def __init__(self, dst, op):
@@ -1333,6 +1316,7 @@ class Fill(object):
         self.start = None
         self.stop = None
         self.deps = {"in": [], "out": []}
+        self.prof_uid = get_prof_uid()
 
     def get_color(self):
         return self.op.get_color()
@@ -1345,35 +1329,24 @@ class Fill(object):
         print(self.dst)
         time = (self.stop - self.start) / 2 + self.start
         cur_level = self.chan.max_live_copies+1 - self.level
-        return (str(self.chan), cur_level+1, time)
+        return (str(self.chan), self.prof_uid)
 
     def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
-        initiation_dependency_helper(op_dependencies, transitive_map, self.get_unique_tuple())
+        initiation_dependencies_helper(op_dependencies, transitive_map, self.get_unique_tuple())
 
     def attach_dependencies(self, state, op_dependencies, transitive_map):
-        if self.has_op_id:
-            op_id = self.op_id
-            if op_id in transitive_map["out"]:
-                self.deps["out"] += op_dependencies[op_id]["out"]
-            if op_id in transitive_map["in"]:
-                self.deps["in"] +=  op_dependencies[op_id]["in"]
-        elif self.has_op:
-            op_id = self.op.op_id
-            # add the in direction
-            if op_id in transitive_map["in"]:
-                op_tuples = map(lambda op: state.find_op(op).get_unique_tuple(),
-                                transitive_map["in"][op_id])
-                self.deps["in"] += op_tuples
+        attach_dependenies_helper(state, op_dependencies, transitive_map,
+                                  self.deps, self)
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         fill_name = repr(self)
 
         _in = json.dumps(self.deps["in"]) if len(self.deps["in"]) > 0 else ""
         out = json.dumps(self.deps["out"]) if len(self.deps["out"]) > 0 else ""
-        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\n" % \
+        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\t%d\n" % \
                 (base_level + (max_levels - self.level),
                 self.start, self.stop,
-                self.get_color(), fill_name, _in, out))
+                self.get_color(), fill_name, _in, out, self.prof_uid))
 
 class Instance(object):
     def __init__(self, inst_id, op):
@@ -1388,31 +1361,22 @@ class Instance(object):
         self.level = None
         self.deps = {"in": [], "out": []}
         self.mem = None
+        self.prof_uid = get_prof_uid()
 
     def get_unique_tuple(self):
         assert self.mem is not None
         print(self.mem)
         time = (self.destroy - self.create) / 2 + self.create
         cur_level = self.mem.max_live_copies+1 - self.level
-        return (str(self.mem), cur_level+1, time)
+        return (str(self.mem), self.prof_uid)
 
     def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
-        initiation_dependency_helper(op_dependencies, transitive_map, self.get_unique_tuple())
+        initiation_dependencies_helper(op_dependencies, transitive_map, 
+                                       self.get_unique_tuple())
 
     def attach_dependencies(self, state, op_dependencies, transitive_map):
-        if self.has_op_id:
-            op_id = self.op_id
-            if op_id in transitive_map["out"]:
-                self.deps["out"] += op_dependencies[op_id]["out"]
-            if op_id in transitive_map["in"]:
-                self.deps["in"] +=  op_dependencies[op_id]["in"]
-        elif self.has_op:
-            op_id = self.op.op_id
-            # add the in direction
-            if op_id in transitive_map["in"]:
-                op_tuples = map(lambda op: state.find_op(op).get_unique_tuple(),
-                                transitive_map["in"][op_id])
-                self.deps["in"] += op_tuples
+        attach_dependenies_helper(state, op_dependencies, transitive_map,
+                                  self.deps, self)
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         assert self.level is not None
@@ -1422,10 +1386,10 @@ class Instance(object):
 
         _in = json.dumps(self.deps["in"]) if len(self.deps["in"]) > 0 else ""
         out = json.dumps(self.deps["out"]) if len(self.deps["out"]) > 0 else ""
-        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\n" % \
+        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\t%d\n" % \
                 (base_level + (max_levels - level),
                  self.create, self.destroy,
-                 self.get_color(), inst_name, _in, out))
+                 self.get_color(), inst_name, _in, out, self.prof_uid))
 
 
     def get_color(self):
@@ -1516,6 +1480,7 @@ class MapperCall(object):
         self.has_op = True
         self.start = start
         self.stop = stop
+        self.prof_uid = get_prof_uid()
 
     def get_timing(self):
         return 'total='+str(self.stop - self.start)+' us start='+ \
@@ -1546,6 +1511,7 @@ class RuntimeCall(object):
         self.has_op = False
         self.start = start
         self.stop = stop
+        self.prof_uid = get_prof_uid()
 
     def get_timing(self):
         return 'total='+str(self.stop - self.start)+' us start='+ \
@@ -2645,9 +2611,13 @@ class State(object):
         spy_state.post_parse(True, True)
 
         print("Performing logical analysis...")
-        spy_state.perform_logical_analysis(False, False)
-        spy_state.perform_physical_analysis(False, False)
-        spy_state.simplify_physical_graph(need_cycle_check=False)
+        # need checks only if we don't have detailed logging
+        need_checks = spy_state.detailed_logging 
+        spy_state.perform_logical_analysis(need_checks, False)
+        spy_state.perform_physical_analysis(need_checks, False)
+        # if not spy_state.detailed_logging:
+        #     # only simplify if we don't havve detailed logging information
+        #     spy_state.simplify_physical_graph(need_cycle_check=False)
 
         op = spy_state.get_operation(spy_state.top_level_uid)
         elevate = dict()
@@ -2656,13 +2626,15 @@ class State(object):
         op.print_event_graph(printer, elevate, all_nodes, True) 
         # Now print the edges at the very end
         for node in all_nodes:
-            for src in node.physical_incoming:
-                if src.uid not in op_dependencies:
-                    op_dependencies[src.uid] = {"in" : set(), "out" : set()}
-                if node.uid not in op_dependencies:
-                    op_dependencies[node.uid] = {"in" : set(), "out" : set()}
-                op_dependencies[src.uid]["in"].add(node.uid)
-                op_dependencies[node.uid]["out"].add(src.uid)
+            if hasattr(node, 'uid'):
+                for src in node.physical_incoming:
+                    if hasattr(src, 'uid'):
+                        if src.uid not in op_dependencies:
+                            op_dependencies[src.uid] = {"in" : set(), "out" : set()}
+                        if node.uid not in op_dependencies:
+                            op_dependencies[node.uid] = {"in" : set(), "out" : set()}
+                        op_dependencies[src.uid]["in"].add(node.uid)
+                        op_dependencies[node.uid]["out"].add(src.uid)
 
         op_existance_map = {}
 
@@ -2671,9 +2643,21 @@ class State(object):
 
         op_dependencies, transitive_map = self.simplify_op_dependencies(op_dependencies, op_existance_map)
 
-        print(op_dependencies)
-
         return op_dependencies, transitive_map
+
+    def convert_op_ids_to_prof_uids(self, op_dependencies):
+        # convert to tuples
+        for op_id in op_dependencies:
+            for _dir in op_dependencies[op_id]:
+                def convert_to_prof_uid(elem):
+                    if not isinstance(elem, tuple):
+                        # needs to be converted
+                        return (self.proc.node_id, self.proc.proc_id, self.prof_uid)
+                    else:
+                        return elem
+                        
+                op_dependencies[op_id][_dir] = map(convert_to_prof_uid, 
+                                                   op_dependencies[op_id][_dir])
 
     def convert_op_ids_to_tuples(self, op_dependencies):
         # convert to tuples
@@ -2735,7 +2719,7 @@ class State(object):
         dep_json_file_name = os.path.join(output_dirname, "json", 
                                           "op_dependencies.json")
 
-        data_tsv_header = "level\tstart\tend\tcolor\topacity\ttitle\tinitiation\tin\tout\n"
+        data_tsv_header = "level\tstart\tend\tcolor\topacity\ttitle\tinitiation\tin\tout\tprof_uid\n"
 
         data_tsv_file = open(data_tsv_file_name, "w")
         data_tsv_file.write(data_tsv_header)
