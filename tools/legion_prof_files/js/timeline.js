@@ -527,7 +527,8 @@ function drawDependencies() {
       .attr("class", "dependencies");
 
   var drewOne = false;
-  timelineEvent.in.concat(timelineEvent.out).forEach(function(dep) {
+
+  var addDependency = function(dep) {
     var depProc = base_map[dep[0] + "," + dep[1]]; // set in calculateBases
     if (depProc.visible && depProc.enabled) {
       var depElement = prof_uid_map[dep[2]];
@@ -540,7 +541,6 @@ function drawDependencies() {
         // create a dummy element so we can reuse timelineLevelCalculator
         var endLevel = endBase + level;
         var endY = dependencyLineLevelCalculator(endLevel);
-        console.log("endLevel:" + endLevel + " endY: " + endY);
         depGroup.append("line")
           .style("stroke", "black")
           .attr("x1", startX)
@@ -558,7 +558,11 @@ function drawDependencies() {
           .style("stroke-width", "1px");
       }
     }
-  });
+  }
+
+  timelineEvent.in.forEach(addDependency);
+  timelineEvent.out.forEach(addDependency);
+
   if (drewOne) {
     depGroup.append("circle")
       .attr("cx", startX)
@@ -1391,7 +1395,6 @@ function load_proc_timeline(proc) {
           prof_uid_map[d.prof_uid] = d;
         }
       }
-      console.log(prof_uid_map);
       proc.loaded = true;
       hideLoaderIcon();
       redraw();

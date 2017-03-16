@@ -1696,6 +1696,7 @@ class State(object):
         self.runtime_call_kinds = {}
         self.runtime_calls = {}
         self.instances = {}
+        self.has_spy_state = False
 
     def parse_log_file(self, file_name, verbose):
         skipped = 0
@@ -1705,6 +1706,10 @@ class State(object):
             first_time = 0L
             last_time = 0L
             for line in log:
+                if not self.has_spy_state and \
+                    (legion_spy.config_pat.match(line) or \
+                     legion_spy.detailed_config_pat.match(line)):
+                    self.has_spy_state = True
                 matches += 1  
                 m = task_info_pat.match(line)
                 if m is not None:
@@ -2726,7 +2731,9 @@ class State(object):
         if not exists(json_dir):
             os.mkdir(json_dir)
         
-        op_dependencies, transitive_map = self.get_op_dependencies(file_names)
+        op_dependencies, transitive_map = None, None
+        if self.has_spy_state:
+            op_dependencies, transitive_map = self.get_op_dependencies(file_names)
 
         # with open(dep_json_file_name, "w") as dep_json_file:
         #     json.dump(op_dependencies, dep_json_file)
@@ -2749,13 +2756,15 @@ class State(object):
 
         if show_procs:
             for proc in self.processors.itervalues():
-                if len(proc.tasks) > 0:
+                if self.has_spy_state and len(proc.tasks) > 0:
                     proc.add_initiation_dependencies(self, op_dependencies, transitive_map)
-            self.convert_op_ids_to_tuples(op_dependencies)
+                    self.convert_op_ids_to_tuples(op_dependencies)
 
             for p,proc in sorted(self.processors.iteritems(), key=lambda x: x[1]):
                 if len(proc.tasks) > 0:
-                    proc.attach_dependencies(self, op_dependencies, transitive_map)
+                    if self.has_spy_state:
+                        proc.attach_dependencies(self, op_dependencies,
+                                                 transitive_map)
                     proc_name = slugify("Proc_" + str(hex(p)))
                     proc_tsv_file_name = os.path.join(tsv_dir, proc_name + ".tsv")
                     with open(proc_tsv_file_name, "w") as proc_tsv_file:

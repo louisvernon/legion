@@ -228,8 +228,8 @@ function filterAndMergeBlocks(state) {
                 end: end,
                 color: "#808080",
                 title: count + " merged tasks",
-                in: d.in,
-                out: d.out
+                in: [],
+                out: []
               });
               i += (count - 1);
             } else {
