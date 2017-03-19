@@ -358,6 +358,10 @@ function getMouseOver() {
       d3.select(this).style("cursor", "pointer")
     }
 
+    if ((d.in.length != 0) || (d.out.length != 0)) {
+      d3.select(this).style("cursor", "pointer")
+    }
+
     var total = d.end - d.start;
     var initiation = "";
     if ((d.initiation != undefined) && d.initiation != "") {

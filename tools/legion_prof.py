@@ -133,16 +133,16 @@ def attach_dependenies_helper(state, op_dependencies, transitive_map, deps, elem
     if elem.has_op_id:
         op_id = elem.op_id
         if op_id in transitive_map["out"]:
-            deps["out"] += op_dependencies[op_id]["out"]
+            deps["out"] |= op_dependencies[op_id]["out"]
         if op_id in transitive_map["in"]:
-            deps["in"] +=  op_dependencies[op_id]["in"]
+            deps["in"] |=  op_dependencies[op_id]["in"]
     elif elem.has_op:
         op_id = elem.op.op_id
         # add the in direction
         if op_id in transitive_map["in"]:
-            op_tuples = map(lambda op: state.find_op(op).get_unique_tuple(),
-                            transitive_map["in"][op_id])
-            deps["in"] += op_tuples
+            op_tuples = set(map(lambda op: state.find_op(op).get_unique_tuple(),
+                            transitive_map["in"][op_id]))
+            deps["in"] |= op_tuples
 
 # Helper function for computing nice colors
 def color_helper(step, num_steps):
@@ -312,7 +312,7 @@ class TaskRange(TimeRange):
     def __init__(self, task):
         TimeRange.__init__(self, task.start, task.stop)
         self.task = task
-        self.deps = {"in": [], "out": []}
+        self.deps = {"in": set(), "out": set()}
         self.prof_uid = task.prof_uid # the task is what contains the uid
 
     def set_level(self, level):
@@ -371,8 +371,8 @@ class TaskRange(TimeRange):
         else:
             color = self.task.variant.color
 
-        _in = json.dumps(self.deps["in"]) if len(self.deps["in"]) > 0 else ""
-        out = json.dumps(self.deps["out"]) if len(self.deps["out"]) > 0 else ""
+        _in = json.dumps(list(self.deps["in"])) if len(self.deps["in"]) > 0 else ""
+        out = json.dumps(list(self.deps["out"])) if len(self.deps["out"]) > 0 else ""
 
         if len(self.task.wait_intervals) > 0:
             start_time = self.start_time
@@ -384,11 +384,11 @@ class TaskRange(TimeRange):
                          _in, out))
                 tsv_file.write("%d\t%ld\t%ld\t%s\t0.15\t%s\t%s\t%s\t%s\t%d\n" % \
                         (cur_level, wait_interval.start,
-                         wait_interval.ready, color, title, initiation, 
+                         wait_interval.ready, color, title + " (waiting)", initiation, 
                          _in, out, self.prof_uid))
                 tsv_file.write("%d\t%ld\t%ld\t%s\t0.45\t%s\t%s\t%s\t%s\n" % \
                         (cur_level, wait_interval.ready,
-                         wait_interval.end, color, title, initiation,
+                         wait_interval.end, color, title + " (ready)", initiation,
                          _in, out))
                 start_time = max(start_time, wait_interval.end)
             if start_time < self.stop_time:
@@ -506,7 +506,7 @@ class MapperCallRange(TimeRange):
     def __init__(self, call):
         TimeRange.__init__(self, call.start, call.stop)
         self.call = call 
-        self.deps = {"in": [], "out": []}
+        self.deps = {"in": set(), "out": set()}
         self.prof_uid = call.prof_uid
 
     def set_level(self, level):
@@ -543,8 +543,8 @@ class MapperCallRange(TimeRange):
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         title = repr(self.call)
-        _in = json.dumps(self.deps["in"]) if len(self.deps["in"]) > 0 else ""
-        out = json.dumps(self.deps["out"]) if len(self.deps["out"]) > 0 else ""
+        _in = json.dumps(list(self.deps["in"])) if len(self.deps["in"]) > 0 else ""
+        out = json.dumps(list(self.deps["out"])) if len(self.deps["out"]) > 0 else ""
         tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\t%d\n" % \
                 (base_level + (max_levels - level),
                  self.start_time, self.stop_time,
@@ -574,7 +574,7 @@ class RuntimeCallRange(TimeRange):
     def __init__(self, call):
         TimeRange.__init__(self, call.start, call.stop)
         self.call = call 
-        self.deps = {"in": [], "out": []}
+        self.deps = {"in": set(), "out": set()}
         self.prof_uid = call.prof_uid
 
     def set_level(self, level):
@@ -1282,7 +1282,7 @@ class Copy(object):
         self.start = None
         self.stop = None
         self.chan = None
-        self.deps = {"in": [], "out": []}
+        self.deps = {"in": set(), "out": set()}
         self.prof_uid = get_prof_uid()
 
     def get_color(self):
@@ -1328,7 +1328,7 @@ class Fill(object):
         self.ready = None
         self.start = None
         self.stop = None
-        self.deps = {"in": [], "out": []}
+        self.deps = {"in": set(), "out": set()}
         self.prof_uid = get_prof_uid()
 
     def get_color(self):
@@ -1372,7 +1372,7 @@ class Instance(object):
         self.create = None
         self.destroy = None
         self.level = None
-        self.deps = {"in": [], "out": []}
+        self.deps = {"in": set(), "out": set()}
         self.mem = None
         self.prof_uid = get_prof_uid()
 
@@ -2540,10 +2540,10 @@ class State(object):
                 for stat_point in statistics:
                     stats_tsv_file.write("%.2f\t%.2f\n" % stat_point)
 
-    def simplify_op(self, op_dependencies, op_existance_map, transitive_map, op_path, _dir):
+    def simplify_op(self, op_dependencies, op_existence_map, transitive_map, op_path, _dir):
         cur_op_id = op_path[-1]
 
-        if op_existance_map[cur_op_id]:
+        if op_existence_map[cur_op_id]:
             # we're done, we've found an op that exists
             for op_id in op_path:
                 # for the children that exist, add it to the transitive map
@@ -2554,10 +2554,10 @@ class State(object):
             children = op_dependencies[cur_op_id][_dir]
             for child_op_id in children:
                 new_op_path = op_path + [child_op_id]
-                self.simplify_op(op_dependencies, op_existance_map, transitive_map,
+                self.simplify_op(op_dependencies, op_existence_map, transitive_map,
                                  new_op_path, _dir)
 
-    def simplify_op_dependencies(self, op_dependencies, op_existance_map):
+    def simplify_op_dependencies(self, op_dependencies, op_existence_map):
         # The dependence relation is transitive. We take advantage of this to
         # remove non-existant ops in the graph by following "out" and "in"
         # pointers until we get to an existing op
@@ -2566,7 +2566,7 @@ class State(object):
         for _dir in ["in", "out"]:
             for op_id in op_dependencies.iterkeys():
                 if not op_id in transitive_map[_dir]:
-                    self.simplify_op(op_dependencies, op_existance_map, transitive_map,
+                    self.simplify_op(op_dependencies, op_existence_map, transitive_map,
                                      [op_id], _dir)
 
         for op_id in op_dependencies.iterkeys():
@@ -2588,6 +2588,8 @@ class State(object):
                     op_dependencies[op_id][_dir] = set()
         return op_dependencies, transitive_map
 
+    # Here, we read the legion spy data! We will use this to draw dependency
+    # lines in the prof
     def get_op_dependencies(self, file_names):
         spy_state = legion_spy.State(False, True, True, True)
 
@@ -2598,6 +2600,9 @@ class State(object):
         print('Matched %d lines across all files.' % total_matches)
         op_dependencies = {}
 
+        # compute the slice_index, slice_slice, and point_slice dependencies
+        # (which legion_spy throws away). We just need to copy this data over
+        # before legion spy throws it away
         for _slice, index in spy_state.slice_index.iteritems():
             while _slice in spy_state.slice_slice:
                 _slice = spy_state.slice_slice[_slice]
@@ -2626,16 +2631,12 @@ class State(object):
             op_dependencies[_slice]["out"].add(point.op.uid)
             op_dependencies[point.op.uid]["in"].add(_slice)
 
-        spy_state.post_parse(True, True)
+        # don't simplify graphs
+        spy_state.post_parse(False, True)
 
-        print("Performing logical analysis...")
-        # need checks only if we don't have detailed logging
-        need_checks = spy_state.detailed_logging 
-        spy_state.perform_logical_analysis(need_checks, False)
-        spy_state.perform_physical_analysis(need_checks, False)
-        # if not spy_state.detailed_logging:
-        #     # only simplify if we don't havve detailed logging information
-        #     spy_state.simplify_physical_graph(need_cycle_check=False)
+        print("Performing physical analysis...")
+        # don't perform any checks (too slow!)
+        spy_state.perform_physical_analysis(False, False)
 
         op = spy_state.get_operation(spy_state.top_level_uid)
         elevate = dict()
@@ -2654,28 +2655,17 @@ class State(object):
                         op_dependencies[src.uid]["in"].add(node.uid)
                         op_dependencies[node.uid]["out"].add(src.uid)
 
-        op_existance_map = {}
+        # have an existence map for the uids (some uids in the event graph are not
+        # actually executed
+        op_existence_map = {}
 
         for op_id, operation in self.operations.iteritems():
-            op_existance_map[op_id] = operation.proc is not None
+            op_existence_map[op_id] = operation.proc is not None
 
-        op_dependencies, transitive_map = self.simplify_op_dependencies(op_dependencies, op_existance_map)
+        # now apply the existence map
+        op_dependencies, transitive_map = self.simplify_op_dependencies(op_dependencies, op_existence_map)
 
         return op_dependencies, transitive_map
-
-    def convert_op_ids_to_prof_uids(self, op_dependencies):
-        # convert to tuples
-        for op_id in op_dependencies:
-            for _dir in op_dependencies[op_id]:
-                def convert_to_prof_uid(elem):
-                    if not isinstance(elem, tuple):
-                        # needs to be converted
-                        return (self.proc.node_id, self.proc.proc_id, self.prof_uid)
-                    else:
-                        return elem
-                        
-                op_dependencies[op_id][_dir] = map(convert_to_prof_uid, 
-                                                   op_dependencies[op_id][_dir])
 
     def convert_op_ids_to_tuples(self, op_dependencies):
         # convert to tuples
@@ -2688,8 +2678,8 @@ class State(object):
                     else:
                         return elem
                         
-                op_dependencies[op_id][_dir] = map(convert_to_tuple, 
-                                                   op_dependencies[op_id][_dir])
+                op_dependencies[op_id][_dir] = set(map(convert_to_tuple, 
+                                                   op_dependencies[op_id][_dir]))
 
 
     def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
