@@ -350,26 +350,27 @@ function getMouseOver() {
                        .attr("y", y)
                        .attr("class", "desc");
 
+
+    if ((d.in.length != 0) || (d.out.length != 0)) {
+      d3.select(this).style("cursor", "pointer")
+    }
+
+    if ((d.in.length != 0) || (d.out.length != 0)) {
+      d3.select(this).style("cursor", "pointer")
+    }
+
+    // descTexts is an array of Texts we will store in the desc view
     var descTexts = [];
-
-    descTexts.push("Title: " + d.title);
-
-    if ((d.in.length != 0) || (d.out.length != 0)) {
-      d3.select(this).style("cursor", "pointer")
-    }
-
-    if ((d.in.length != 0) || (d.out.length != 0)) {
-      d3.select(this).style("cursor", "pointer")
-    }
-
     var total = d.end - d.start;
     var initiation = "";
+    // Insert texts in reverse order
+    descTexts.push("End:   " + d.end + "us");
+    descTexts.push("Start: " + d.start + "us");
+    descTexts.push("Total: " + total + "us");
     if ((d.initiation != undefined) && d.initiation != "") {
       descTexts.push("Initiator: " + state.operations[d.initiation].desc);
     } 
-    descTexts.push("Start: " + d.start + "us");
-    descTexts.push("End:   " + d.end + "us");
-    descTexts.push("Total: " + total + "us");
+    descTexts.push(d.title);
 
     var title = text.append("tspan")
       .attr("x", x)
@@ -391,9 +392,9 @@ function getMouseOver() {
     var bbox = descView.node().getBBox();
     var padding = 2;
     var rect = descView.insert("rect", "text")
-        .attr("x", bbox.x - padding)
+        .attr("x", bbox.x - 2*padding)
         .attr("y", bbox.y - padding)
-        .attr("width", bbox.width + (padding*2))
+        .attr("width", bbox.width + (padding*4))
         .attr("height", bbox.height + (padding*2))
         .style("fill", "#222")
         .style("opacity", "0.7");
