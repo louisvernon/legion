@@ -466,7 +466,7 @@ do
         var e = s
 
         var p1_pxp = p1.pxp
-        e.exp = 0.5*(p1_pxp + p2.pxp)
+        e.exp = vec2_mul_lhs(0.5, vec2_add(p1_pxp, p2.pxp))
 
         zxp += p1_pxp
 
@@ -489,7 +489,7 @@ do
         var e = s
 
         var p1_pxp = p1.pxp
-        e.exp = 0.5*(p1_pxp + p2.pxp)
+        e.exp = vec2_mul_lhs(0.5, vec2_add(p1_pxp, p2.pxp))
 
         zxp += p1_pxp
 
@@ -508,6 +508,7 @@ do
       var zareap = 0.0
       var zvolp = 0.0
       var nside = 1
+      var numsbad = 0
       for s_raw = s_span.start, s_span.stop do
         var s = unsafe_cast(ptr(side(rz, rpp, rpg, rs), rs), s_raw)
 
@@ -517,11 +518,11 @@ do
 
         var p1_pxp = p1.pxp
         var p2_pxp = p2.pxp
-        var sa = 0.5 * cross(p2_pxp - p1_pxp, z.zxp - p1_pxp)
+        var sa = 0.5 * vec2_cross(vec2_sub(p2_pxp, p1_pxp), vec2_sub(z.zxp, p1_pxp))
         var sv = sa * (p1_pxp.x + p2_pxp.x + z.zxp.x)
         s.sareap = sa
         -- s.svolp = sv
-        s.elen = length(p2_pxp - p1_pxp)
+        s.elen = vec2_length(vec2_sub(p2_pxp, p1_pxp))
 
         zareap += sa
         zvolp += sv
@@ -535,12 +536,14 @@ do
         end
         nside += 1
 
-        regentlib.assert(sv > 0.0, "sv negative")
+        numsbad += int(sv <= 0.0)
       end
+      regentlib.assert(numsbad == 0, "sv negative")
     else
       var zareap = 0.0
       var zvolp = 0.0
       var nside = 1
+      var numsbad = 0
       for s_raw = s_span.start, s_span.stop do
         var s = unsafe_cast(ptr(side(rz, rpp, rpg, rs), rs), s_raw)
 
@@ -550,11 +553,11 @@ do
 
         var p1_pxp = p1.pxp
         var p2_pxp = p2.pxp
-        var sa = 0.5 * cross(p2_pxp - p1_pxp, z.zxp - p1_pxp)
+        var sa = 0.5 * vec2_cross(vec2_sub(p2_pxp, p1_pxp), vec2_sub(z.zxp, p1_pxp))
         var sv = sa * (p1_pxp.x + p2_pxp.x + z.zxp.x)
         s.sareap = sa
         -- s.svolp = sv
-        s.elen = length(p2_pxp - p1_pxp)
+        s.elen = vec2_length(vec2_sub(p2_pxp, p1_pxp))
 
         zareap += sa
         zvolp += sv
@@ -568,8 +571,9 @@ do
         end
         nside += 1
 
-        regentlib.assert(sv > 0.0, "sv negative")
+        numsbad += int(sv <= 0.0)
       end
+      regentlib.assert(numsbad == 0, "sv negative")
     end
 
     -- Compute zone characteristic lengths.
@@ -584,12 +588,7 @@ do
 
         var area = s.sareap
         var base = e.elen
-        var fac = 0.0
-        if z.znump == 3 then
-          fac = 3.0
-        else
-          fac = 4.0
-        end
+        var fac = 3.0 + [int](z.znump ~= 3) * 1.0
         var sdl = fac * area / base
         zdl = min(zdl, sdl)
 
@@ -1187,7 +1186,7 @@ do
         var e = s
 
         var p1_px = p1.px
-        e.ex = 0.5*(p1_px + p2.px)
+        e.ex = vec2_mul_lhs(0.5, vec2_add(p1_px, p2.px))
 
         zx += p1_px
 
@@ -1210,7 +1209,7 @@ do
         var e = s
 
         var p1_px = p1.px
-        e.ex = 0.5*(p1_px + p2.px)
+        e.ex = vec2_mul_lhs(0.5, vec2_add(p1_px, p2.px))
 
         zx += p1_px
 
@@ -1228,6 +1227,7 @@ do
       var zarea = 0.0
       var zvol = 0.0
       var nside = 1
+      var numsbad = 0
       for s_raw = s_span.start, s_span.stop do
         var s = unsafe_cast(ptr(side(rz, rpp, rpg, rs), rs), s_raw)
 
@@ -1254,12 +1254,14 @@ do
         end
         nside += 1
 
-        regentlib.assert(sv > 0.0, "sv negative")
+        numsbad += int(sv <= 0.0)
       end
+      regentlib.assert(numsbad == 0, "sv negative")
     else
       var zarea = 0.0
       var zvol = 0.0
       var nside = 1
+      var numsbad = 0
       for s_raw = s_span.start, s_span.stop do
         var s = unsafe_cast(ptr(side(rz, rpp, rpg, rs), rs), s_raw)
 
@@ -1286,8 +1288,9 @@ do
         end
         nside += 1
 
-        regentlib.assert(sv > 0.0, "sv negative")
+        numsbad += int(sv <= 0.0)
       end
+      regentlib.assert(numsbad == 0, "sv negative")
     end
 
     --
@@ -1304,9 +1307,9 @@ do
         var p1 = unsafe_cast(ptr(point, rpp), s.mapsp1)
         var p2 = unsafe_cast(ptr(point, rpp), s.mapsp2)
 
-        var sftot = s.sfp + s.sfq
-        var sd1 = dot(sftot, p1.pu0 + p1.pu)
-        var sd2 = dot(-1.0*sftot, p2.pu0 + p2.pu)
+        var sftot = vec2_add(s.sfp, s.sfq)
+        var sd1 = vec2_dot(sftot, vec2_add(p1.pu0, p1.pu))
+        var sd2 = vec2_dot(vec2_mul_lhs(-1.0, sftot), vec2_add(p2.pu0, p2.pu))
         var dwork = -0.5 * dt * (sd1 * p1.pxp.x + sd2 * p2.pxp.x)
 
         zdwork += dwork
@@ -1329,9 +1332,9 @@ do
         var p1 = s.mapsp1
         var p2 = s.mapsp2
 
-        var sftot = s.sfp + s.sfq
-        var sd1 = dot(sftot, p1.pu0 + p1.pu)
-        var sd2 = dot(-1.0*sftot, p2.pu0 + p2.pu)
+        var sftot = vec2_add(s.sfp, s.sfq)
+        var sd1 = vec2_dot(sftot, vec2_add(p1.pu0, p1.pu))
+        var sd2 = vec2_dot(vec2_mul_lhs(-1.0, sftot), vec2_add(p2.pu0, p2.pu))
         var dwork = -0.5 * dt * (sd1 * p1.pxp.x + sd2 * p2.pxp.x)
 
         zdwork += dwork
@@ -1407,6 +1410,7 @@ do
   do
     var fuzz = 1e-99
     var dtnew = dtmax
+    --__demand(__vectorize)
     for z in rz do
       var cdu = max(z.zdu, max(z.zss, fuzz))
       var zdthyd = z.zdl * cfl / cdu
@@ -1420,6 +1424,7 @@ do
   -- Calc dt volume.
   do
     var dvovmax = 1e-99
+    --__demand(__vectorize)
     for z in rz do
       var zdvov = abs((z.zvol - z.zvol0) / z.zvol0)
       dvovmax max= zdvov
