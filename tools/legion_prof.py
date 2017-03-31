@@ -123,12 +123,13 @@ def get_simplified_dependencies(op_dependencies, transitive_map, _dir, op_id):
     return simplified_dependencies
 
 def initiation_dependencies_helper(op_dependencies, transitive_map, elem, unique_tuple):
-    if elem.has_op:
+    if elem.has_op: # TODO better check here
         op_id = elem.op.op_id
         if op_id in transitive_map["in"]: # this op exists
             for in_op_id in transitive_map["in"][op_id]:
                 op_dependencies[in_op_id]["out"].add(unique_tuple)
 
+# TODO: better differentiation between these
 def attach_dependenies_helper(state, op_dependencies, transitive_map, deps, elem):
     if elem.has_op_id:
         op_id = elem.op_id
@@ -192,121 +193,93 @@ def color_helper(step, num_steps):
 def read_time(string):
     return long(string)/1000
 
+class HasDependencies(object):
+    def __init__(self):
+        self.deps = {"in": set(), "out": set()}
+    
+    def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
+        pass
+
+    def attach_dependencies(self, state, op_dependencies, transitive_map):
+        if self.op_id in transitive_map["out"]:
+            self.deps["out"] |= op_dependencies[self.op_id]["out"]
+        if self.op_id in transitive_map["in"]:
+            self.deps["in"] |=  op_dependencies[self.op_id]["in"]
+
+    def get_unique_tuple(self):
+        assert self.proc is not None
+        cur_level = self.proc.max_levels - self.level
+        return (self.proc.node_id, self.proc.proc_in_node, self.prof_uid)
+
+class HasInitiationDependencies(HasDependencies):
+    def __init__(self):
+        HasDependencies.__init__(self)
+
+    def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
+        unique_tuple = self.get_unique_tuple()
+        if self.initiation in transitive_map["in"]: # this op exists
+            for in_op_id in transitive_map["in"][self.initiation]:
+                op_dependencies[in_op_id]["out"].add(unique_tuple)
+
+    def attach_dependencies(self, state, op_dependencies, transitive_map):
+        # add the in direction
+        if self.initiation in transitive_map["in"]:
+            op_tuples = set(map(lambda op: state.find_op(op).get_unique_tuple(),
+                            transitive_map["in"][self.initiation]))
+            self.deps["in"] |= op_tuples
+
+class HasNoDependencies(HasDependencies):
+    def __init__(self):
+        HasDependencies.__init__(self)
+    
+    def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
+        pass
+
+    def attach_dependencies(self, state, op_dependencies, transitive_map):
+        pass
+
 class TimeRange(object):
-    def __init__(self, start_time, stop_time):
-        assert start_time <= stop_time
-        self.start_time = long(start_time)
-        self.stop_time = long(stop_time)
-        self.subranges = list()
+    def __init__(self, create, ready, start, stop):
+        assert create <= ready
+        assert ready <= start
+        assert start <= stop
+        self.create = create
+        self.ready = ready
+        self.start = start
+        self.stop = stop
 
     def __cmp__(self, other):
         # The order chosen here is critical for sort_range. Ranges are
         # sorted by start_event first, and then by *reversed*
         # end_event, so that each range will precede any ranges they
         # contain in the order.
-        if self.start_time < other.start_time:
+        if self.start < other.start:
             return -1
-        if self.start_time > other.start_time:
+        if self.start > other.start:
             return 1
 
-        if self.stop_time > other.stop_time:
+        if self.stop > other.stop:
             return -1
-        if self.stop_time < other.stop_time:
+        if self.stop < other.stop:
             return 1
         return 0
 
     def contains(self, other):
-        if self.start_time <= other.start_time and \
-            other.stop_time <= self.stop_time:
+        if self.start <= other.start and \
+            other.stop <= self.stop:
             return True
         return False
 
-    def add_range(self, other):
-        assert self.contains(other)
-        self.subranges.append(other)
-
-    def sort_range(self):
-        self.subranges.sort()
-
-        removed = set()
-        stack = []
-        for subrange in self.subranges:
-            while len(stack) > 0 and not stack[-1].contains(subrange):
-                stack.pop()
-            if len(stack) > 0:
-                stack[-1].add_range(subrange)
-                removed.add(subrange)
-            stack.append(subrange)
-
-        self.subranges = [s for s in self.subranges if s not in removed]
+    # mapper_time is overrided by MapperCallRange to be non-zero
+    def mapper_time(self):
+        return 0
 
     def total_time(self):
-        return self.stop_time - self.start_time
-
-    def max_levels(self):
-        max_lev = 0
-        for idx in range(len(self.subranges)):
-            levels = self.subranges[idx].max_levels()
-            if levels > max_lev:
-                max_lev = levels
-        return max_lev+1
-
-    def emit_svg_range(self, printer):
-        self.emit_svg(printer, 0)
-
-    def emit_tsv_range(self, tsv_file, base_level, max_levels):
-        self.emit_tsv(tsv_file, base_level, max_levels, 0)
+        return self.stop - self.start
 
     def __repr__(self):
         return "Start: %d us  Stop: %d us  Total: %d us" % (
-            self.start_time,
-            self.end_time,
-            self.total_time())
-
-class BaseRange(TimeRange):
-    def __init__(self, start_time, stop_time, proc):
-        TimeRange.__init__(self, start_time, stop_time)
-        self.proc = proc
-
-    def emit_svg(self, printer, level):
-        title = repr(self.proc)
-        printer.emit_time_line(level, self.start_time, self.stop_time, title)
-        for subrange in self.subranges:
-            subrange.emit_svg(printer, level + 1)
-
-    def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
-        for subrange in self.subranges:
-            subrange.add_initiation_dependencies(state, op_dependencies, transitive_map)
-
-    def attach_dependencies(self, state, op_dependencies, transitive_map):
-        for subrange in self.subranges:
-            subrange.attach_dependencies(state, op_dependencies, transitive_map)
-
-    def emit_tsv(self, tsv_file, base_level, max_levels, level):
-        for subrange in self.subranges:
-            subrange.emit_tsv(tsv_file, base_level, max_levels, level + 1)
-
-    def update_task_stats(self, stat, proc):
-        for r in self.subranges:
-            r.update_task_stats(stat, proc)
-
-    def active_time(self):
-        total = 0
-        for subrange in self.subranges:
-            total = total + subrange.active_time()
-        return total
-
-    def application_time(self):
-        total = 0
-        for subrange in self.subranges:
-            total = total + subrange.application_time()
-        return total
-
-    def meta_time(self):
-        total = 0
-        for subrange in self.subranges:
-            total = total + subrange.meta_time()
-        return total
+                self.start, self.end, self.total_time())
 
 class TaskRange(TimeRange):
     def __init__(self, task):
@@ -319,25 +292,6 @@ class TaskRange(TimeRange):
         self.level = level
         self.task.level = level
 
-    def emit_svg(self, printer, level):
-        if self.task.is_task:
-            assert self.task.is_task
-            assert self.task.variant is not None
-            title = repr(self.task)
-            if self.task.is_meta:
-                title += (' '+self.task.get_initiation())
-            title += (' '+self.task.get_timing())
-            printer.emit_timing_range(self.task.variant.color, level,
-                                      self.start_time, self.stop_time, title)
-        else:
-            title = repr(self.task)
-            title += (' '+self.task.get_timing())
-            printer.emit_timing_range("#555555", level,
-                                      self.start_time, self.stop_time, title)
-
-        for subrange in self.subranges:
-            subrange.emit_svg(printer, level+1)
-
     def get_unique_tuple(self):
         assert self.task.proc is not None
         time = (self.task.stop - self.task.start) / 2 + self.task.start
@@ -346,15 +300,10 @@ class TaskRange(TimeRange):
 
     def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
         initiation_dependencies_helper(op_dependencies, transitive_map, self.task, self.get_unique_tuple())
-        for subrange in self.subranges:
-            subrange.add_initiation_dependencies(state, op_dependencies, transitive_map)
 
     def attach_dependencies(self, state, op_dependencies, transitive_map):
         attach_dependenies_helper(state, op_dependencies, transitive_map,
                                   self.deps, self.task)
-
-        for subrange in self.subranges:
-            subrange.attach_dependencies(state, op_dependencies, transitive_map)
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         title = repr(self.task)
@@ -375,11 +324,11 @@ class TaskRange(TimeRange):
         out = json.dumps(list(self.deps["out"])) if len(self.deps["out"]) > 0 else ""
 
         if len(self.task.wait_intervals) > 0:
-            start_time = self.start_time
+            start = self.start
             cur_level = base_level + (max_levels - level)
             for wait_interval in self.task.wait_intervals:
                 tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\t%s\t%s\n" % \
-                        (cur_level, start_time, 
+                        (cur_level, start, 
                          wait_interval.start, color, title, initiation,
                          _in, out))
                 tsv_file.write("%d\t%ld\t%ld\t%s\t0.15\t%s\t%s\t%s\t%s\t%d\n" % \
@@ -390,83 +339,48 @@ class TaskRange(TimeRange):
                         (cur_level, wait_interval.ready,
                          wait_interval.end, color, title + " (ready)", initiation,
                          _in, out))
-                start_time = max(start_time, wait_interval.end)
-            if start_time < self.stop_time:
+                start = max(start, wait_interval.end)
+            if start < self.stop:
                 tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\t%s\t%s\n" % \
-                        (cur_level, start_time,
-                         self.stop_time, color, title, initiation, 
+                        (cur_level, start,
+                         self.stop, color, title, initiation, 
                          _in, out))
         else:
             tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\t%s\t%s\t%d\n" % \
                     (base_level + (max_levels - level),
-                     self.start_time, self.stop_time,
+                     self.start, self.stop,
                      color,title,initiation, _in, out, self.prof_uid))
-        for subrange in self.subranges:
-            subrange.emit_tsv(tsv_file, base_level, max_levels, level + 1)
-
-    def update_task_stats(self, stat, proc):
-        exec_time = self.total_time()
-        last_time = self.start_time
-        #for subrange in self.subranges:
-        #    subrange.update_task_stats(stat)
-        #    if last_time > subrange.start_time:
-        #        exec_time -= subrange.stop_time - last_time
-        #    else:
-        #        exec_time -= subrange.total_time()
-        #    last_time = max(last_time, subrange.stop_time)
-        #assert exec_time >= 0
-        if self.task.is_task:
-            stat.record_task(self.task, exec_time, proc)
 
     def active_time(self):
         return self.total_time()
 
+    # TODO
     def application_time(self):
         if self.task.is_meta:
             # Add up the application time from all subranges
             total = 0
-            for subrange in self.subranges:
-                total += subrange.application_time()
             return total
         else:
             # Take our total minus meta time plus application time
             total = self.total_time()
-            for subrange in self.subranges:
-                total += subrange.application_time()
-                total -= subrange.meta_time()
-                assert total >= 0
             return total
 
     def meta_time(self):
         if self.task.is_meta:
             total = self.total_time()
-            for subrange in self.subranges:
-                total += subrange.meta_time()
-                total -= subrange.application_time()
-                assert total >= 0
             return total
         else:
             total = 0
-            for subrange in self.subranges:
-                total += subrange.meta_time()
             return total
 
 class MessageRange(TimeRange):
     def __init__(self, message):
-        TimeRange.__init__(self, message.start, message.stop)
+        TimeRange.__init__(self, None, None, message.start, message.stop)
         self.message = message
 
     def set_level(self, level):
         self.level = level
         self.message.level = level
-
-    def emit_svg(self, printer, level):
-        title = repr(self.message)
-        title += (' '+self.message.get_timing())
-        printer.emit_timing_range(self.message.kind.color, level,
-                                  self.start_time, self.stop_time, title)
-        for subrange in self.subranges:
-            subrange.emit_svg(printer, level+1)
 
     def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
         pass
@@ -479,14 +393,8 @@ class MessageRange(TimeRange):
         title = repr(self.message)
         tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t\t\n" % \
                 (base_level + (max_levels - level),
-                 self.start_time, self.stop_time,
+                 self.start, self.stop,
                  self.message.kind.color,title))
-        for subrange in self.subranges:
-            subrange.emit_tsv(tsv_file, base_level, max_levels, level + 1)
-
-    def update_task_stats(self, stat, proc):
-        for subrange in self.subranges:
-            subrange.update_task_stats(stat, proc)
 
     def active_time(self):
         return self.total_time()
@@ -494,12 +402,9 @@ class MessageRange(TimeRange):
     def application_time(self):
         return 0
 
+    # TODO
     def meta_time(self):
         total = self.total_time()
-        for subrange in self.subranges:
-            total += subrange.meta_time()
-            total -= subrange.application_time()
-            assert total >= 0
         return total
 
 class MapperCallRange(TimeRange):
@@ -513,14 +418,6 @@ class MapperCallRange(TimeRange):
         self.level = level
         self.call.level = level
 
-    def emit_svg(self, printer, level):
-        title = repr(self.call)
-        title += (' '+self.call.get_timing())
-        printer.emit_timing_range(self.call.kind.color, level,
-                                  self.start_time, self.stop_time, title)
-        for subrange in self.subranges:
-            subrange.emit_svg(printer, level+1)
-
     def get_unique_tuple(self):
         assert self.call.proc is not None
         print(self.call.proc)
@@ -531,15 +428,9 @@ class MapperCallRange(TimeRange):
     def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
         initiation_dependencies_helper(op_dependencies, transitive_map, self.call, self.get_unique_tuple())
 
-        for subrange in self.subranges:
-            subrange.add_initiation_dependencies(state, op_dependencies, transitive_map)
-
     def attach_dependencies(self, state, op_dependencies, transitive_map):
         attach_dependenies_helper(state, op_dependencies, transitive_map,
                                   self.deps, self.call)
-
-        for subrange in self.subranges:
-            subrange.attach_dependencies(state, op_dependencies, transitive_map)
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         title = repr(self.call)
@@ -547,14 +438,11 @@ class MapperCallRange(TimeRange):
         out = json.dumps(list(self.deps["out"])) if len(self.deps["out"]) > 0 else ""
         tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\t%d\n" % \
                 (base_level + (max_levels - level),
-                 self.start_time, self.stop_time,
+                 self.start, self.stop,
                  self.call.kind.color,title,_in,out,self.prof_uid))
-        for subrange in self.subranges:
-            subrange.emit_tsv(tsv_file, base_level, max_levels, level + 1)
 
-    def update_task_stats(self, stat, proc):
-        for subrange in self.subranges:
-            subrange.update_task_stats(stat, proc)
+    def mapper_time(self):
+        return self.total_time()
 
     def active_time(self):
         return self.total_time()
@@ -562,12 +450,9 @@ class MapperCallRange(TimeRange):
     def application_time(self):
         return 0
 
+    # TODO
     def meta_time(self):
         total = self.total_time()
-        for subrange in self.subranges:
-            total += subrange.meta_time()
-            total -= subrange.application_time()
-            assert total >= 0
         return total
 
 class RuntimeCallRange(TimeRange):
@@ -581,17 +466,8 @@ class RuntimeCallRange(TimeRange):
         self.level = level
         self.call.level = level
 
-    def emit_svg(self, printer, level):
-        title = repr(self.call)
-        title += (' '+self.call.get_timing())
-        printer.emit_timing_range(self.call.kind.color, level,
-                                  self.start_time, self.stop_time, title)
-        for subrange in self.subranges:
-            subrange.emit_svg(printer, level+1)
-
     def get_unique_tuple(self):
         assert self.call.proc is not None
-        print(self.call.proc)
         time = (self.call.stop - self.call.start) / 2 + self.call.start
         cur_level = self.call.proc.max_levels - self.level
         return (self.call.proc.node_id, self.call.proc.proc_in_node, self.prof_uid)
@@ -599,15 +475,9 @@ class RuntimeCallRange(TimeRange):
     def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
         initiation_dependencies_helper(op_dependencies, transitive_map, self.call, self.get_unique_tuple())
 
-        for subrange in self.subranges:
-            subrange.add_initiation_dependencies(state, op_dependencies, transitive_map)
-
     def attach_dependencies(self, state, op_dependencies, transitive_map):
         attach_dependenies_helper(state, op_dependencies, transitive_map,
                                   self.deps, self.call)
-
-        for subrange in self.subranges:
-            subrange.attach_dependencies(state, op_dependencies, transitive_map)
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         title = repr(self.call)
@@ -615,14 +485,8 @@ class RuntimeCallRange(TimeRange):
         out = json.dumps(self.deps["out"]) if len(self.deps["out"]) > 0 else ""
         tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\t%d\n" % \
                 (base_level + (max_levels - level),
-                 self.start_time, self.stop_time,
+                 self.start, self.stop,
                  self.call.kind.color,title,_in,out,self.prof_uid))
-        for subrange in self.subranges:
-            subrange.emit_tsv(tsv_file, base_level, max_levels, level + 1)
-
-    def update_task_stats(self, stat, proc):
-        for subrange in self.subranges:
-            subrange.update_task_stats(stat, proc)
 
     def active_time(self):
         return self.total_time()
@@ -630,12 +494,9 @@ class RuntimeCallRange(TimeRange):
     def application_time(self):
         return 0
 
+    # TODO
     def meta_time(self):
         total = self.total_time()
-        for subrange in self.subranges:
-            total += subrange.meta_time()
-            total -= subrange.application_time()
-            assert total >= 0
         return total
 
 class Processor(object):
@@ -648,7 +509,7 @@ class Processor(object):
         self.proc_in_node = (proc_id) & ((1 << 12) - 1)
         self.kind = kind
         self.app_ranges = list()
-        self.full_range = None
+        self.last_time = None
         self.tasks = list()
         self.max_levels = 0
         self.time_points = list()
@@ -658,7 +519,7 @@ class Processor(object):
 
     def add_task(self, task):
         task.proc = self
-        self.tasks.append(TaskRange(task))
+        self.tasks.append(task)
 
     def add_message(self, message):
         # treating messages like any other task
@@ -668,21 +529,18 @@ class Processor(object):
     def add_mapper_call(self, call):
         # treating mapper calls like any other task
         call.proc = self
-        self.tasks.append(MapperCallRange(call))
+        self.tasks.append(call)
 
     def add_runtime_call(self, call):
         # treating runtime calls like any other task
         call.proc = self
-        self.tasks.append(RuntimeCallRange(call))
-
-    def init_time_range(self, last_time):
-        self.full_range = BaseRange(0L, last_time, self)
+        self.tasks.append(call)
 
     def sort_time_range(self):
         time_points = list()
         for task in self.tasks:
-            self.time_points.append(TimePoint(task.start_time, task, True))
-            self.time_points.append(TimePoint(task.stop_time, task, False))
+            self.time_points.append(TimePoint(task.start, task, True))
+            self.time_points.append(TimePoint(task.stop, task, False))
         self.time_points.sort(key=lambda p: p.time_key)
         free_levels = set()
         for point in self.time_points:
@@ -695,18 +553,6 @@ class Processor(object):
                     point.thing.set_level(self.max_levels)
             else:
                 free_levels.add(point.thing.level)
-
-    def emit_svg(self, printer):
-        # Skip any empty processors
-        if self.max_levels > 0:
-            printer.init_chunk(self.max_levels + 1)
-            title = repr(self)
-            printer.emit_time_line(0, 0, self.full_range.stop_time, title)
-            # iterate over tasks in start time order
-            for point in self.time_points:
-                if point.first:
-                    point.thing.emit_svg(printer, point.thing.level)
-
 
     def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
         for point in self.time_points:
@@ -727,24 +573,52 @@ class Processor(object):
                                      point.thing.level)
         return base_level + max(self.max_levels, 1) + 1
 
+    def total_time(self):
+        assert self.full_range is not None
+        return self.full_range.total_time()
+
+
+    def active_time(self):
+        total = 0
+        for task in self.tasks:
+            total += task.active_time()
+        return total
+
+    def application_time(self):
+        total = 0
+        for task in self.tasks:
+            total += task.application_time()
+        return total
+
+    def meta_time(self):
+        total = 0
+        for task in self.tasks:
+            total += task.meta_time()
+        return total
+
+    def mapper_time(self):
+        total = 0
+        for task in self.tasks:
+            total += task.mapper_time()
+        return total
+
     def print_stats(self):
-        total_time = self.full_range.total_time()
-        active_time = self.full_range.active_time()
-        application_time = self.full_range.application_time()
-        meta_time = self.full_range.meta_time()
+        total_time = self.total_time()
+        active_time = self.active_time()
+        application_time = self.application_time()
+        meta_time = self.meta_time()
+        mapper_time = self.mapper_time()
         active_ratio = 100.0*float(active_time)/float(total_time)
         application_ratio = 100.0*float(application_time)/float(total_time)
         meta_ratio = 100.0*float(meta_time)/float(total_time)
+        mapper_ratio = 100.0*float(mapper_time)/float(total_time)
         print(self)
         print("    Total time: %d us" % total_time)
         print("    Active time: %d us (%.3f%%)" % (active_time, active_ratio))
         print("    Application time: %d us (%.3f%%)" % (application_time, application_ratio))
         print("    Meta time: %d us (%.3f%%)" % (meta_time, meta_ratio))
+        print("    Mapper time: %d us (%.3f%%)" % (mapper_time, mapper_ratio))
         print()
-
-    def update_task_stats(self, stat):
-        for task in self.tasks:
-            task.update_task_stats(stat, self)
 
     def __repr__(self):
         return '%s Processor %s' % (self.kind, hex(self.proc_id))
@@ -810,21 +684,6 @@ class Memory(object):
             else:
                 # Finishing this instance so restore its point
                 free_levels.add(point.thing.level)
-
-    def emit_svg(self, printer):
-        assert self.last_time is not None
-        max_levels = self.max_live_instances + 1       
-        if max_levels > 1:
-            printer.init_chunk(max_levels)
-            title = repr(self) 
-            printer.emit_time_line(0, 0, self.last_time, title) 
-            for instance in self.instances:
-                assert instance.level is not None
-                assert instance.create is not None
-                assert instance.destroy is not None
-                inst_name = repr(instance)
-                printer.emit_timing_range(instance.get_color(), instance.level,
-                                          instance.create, instance.destroy, inst_name)
 
     def emit_tsv(self, tsv_file, base_level):
         max_levels = self.max_live_instances + 1
@@ -929,21 +788,6 @@ class Channel(object):
                 # Finishing this instance so restore its point
                 free_levels.add(point.thing.level)
 
-    def emit_svg(self, printer):
-        assert self.last_time is not None
-        max_levels = self.max_live_copies + 1
-        if max_levels > 1:
-            printer.init_chunk(max_levels)
-            title = repr(self)
-            printer.emit_time_line(0, 0, self.last_time, title)
-            for copy in self.copies:
-                assert copy.level is not None
-                assert copy.start is not None
-                assert copy.stop is not None
-                copy_name = repr(copy)
-                printer.emit_timing_range(copy.get_color(), copy.level,
-                                          copy.start, copy.stop, copy_name)
-
     def emit_tsv(self, tsv_file, base_level):
         max_levels = self.max_live_copies + 1
         if max_levels > 1:
@@ -1022,7 +866,7 @@ class Variant(object):
         self.variant_id = variant_id
         self.name = name
         self.op = dict()
-        self.task = None
+        self.task_kind = None
         self.color = None
         self.total_calls = dict()
         self.total_execution_time = dict()
@@ -1030,9 +874,12 @@ class Variant(object):
         self.max_call = dict()
         self.min_call = dict()
 
-    def set_task(self, task):
-        assert self.task == None
-        self.task = task
+    def __eq__(self, other):
+        return self.variant_id == other.variant_id
+
+    def set_task_kind(self, task_kind):
+        assert self.task_kind == None or self.task_kind == task_kind
+        self.task_kind = task_kind
 
     def compute_color(self, step, num_steps):
         assert self.color is None
@@ -1121,8 +968,22 @@ class Variant(object):
                         self.min_call[proc], min_dev)
                 print()
 
-class Operation(object):
+class Base(object):
+    def __init__(self):
+        self.prof_uid = get_prof_uid()
+        self.level = None
+
+    def set_level(self, level):
+        self.level = level
+
+    def get_unique_tuple(self):
+        assert self.proc is not None
+        cur_level = self.proc.max_levels - self.level
+        return (self.proc.node_id, self.proc.proc_in_node, self.prof_uid)
+
+class Operation(Base):
     def __init__(self, op_id):
+        Base.__init__(self)
         self.op_id = op_id
         self.has_op_id = True
         self.has_op = False
@@ -1135,39 +996,33 @@ class Operation(object):
         self.name = 'Operation '+str(op_id)
         self.variant = None
         self.task_kind = None
-        self.create = None
-        self.ready = None
-        self.start = None
-        self.stop = None
         self.color = None
-        self.wait_intervals = list()
         self.owner = None
-        self.prof_uid = get_prof_uid()
         self.proc = None
+
+    def set_level(self, level):
+        self.level = level
 
     def add_wait_interval(self, start, ready, end):
         self.wait_intervals.append(WaitInterval(start, ready, end))
 
     def assign_color(self, color_map):
         assert self.color is None
-        if self.is_task:
-            assert self.variant is not None
-            self.color = self.variant.color
-        elif self.is_proftask:
-            self.color = '#FFCOCB' # Pink
-        elif self.kind is None:
+        # if self.is_task:
+        #     assert self.variant is not None
+        #     self.color = self.variant.color
+        # elif self.is_proftask:
+        #     self.color = '#FFCOCB' # Pink
+        if self.kind is None:
             self.color = '#000000' # Black
         else:
             assert self.kind_num in color_map
             self.color = color_map[self.kind_num]
 
-    def get_unique_tuple(self):
-        assert self.proc is not None
-        time = (self.stop - self.start) / 2 + self.start
-        cur_level = self.proc.max_levels - self.level
-        return (self.proc.node_id, self.proc.proc_in_node, self.prof_uid)
-
     def get_color(self):
+        if self.color is None:
+            print(repr(self))
+            print(type(self))
         assert self.color is not None
         return self.color
 
@@ -1199,7 +1054,7 @@ class Operation(object):
     def __repr__(self):
         if self.is_task:
             assert self.variant is not None
-            title = self.variant.task.name if self.variant.task is not None else 'unnamed'
+            title = self.variant.task_kind.name if self.variant.task_kind is not None else 'unnamed'
             if self.variant.name <> None and self.variant.name.find("unnamed") > 0:
                 title += ' ['+self.variant.name+']'
             return title+' '+self.get_info()
@@ -1217,24 +1072,85 @@ class Operation(object):
             else:
                 return self.kind+' Operation '+self.get_info()
 
-class MetaTask(object):
-    def __init__(self, variant, op):
-        self.variant = variant
-        self.op = op
-        self.has_op_id = False
-        self.has_op = True
-        self.is_task = True
-        self.is_meta = True
-        self.create = None
-        self.ready = None
-        self.start = None
-        self.stop = None
-        self.proc = None # set later
+class HasWaiters(object):
+    def __init__(self):
         self.wait_intervals = list()
-        self.prof_uid = get_prof_uid()
 
     def add_wait_interval(self, start, ready, end):
         self.wait_intervals.append(WaitInterval(start, ready, end))
+
+    def emit_tsv(self, tsv_file, base_level, max_levels, level):
+        title = repr(self)
+        initiation = str(self.initiation)
+        color = self.get_color()
+
+        _in = json.dumps(list(self.deps["in"])) if len(self.deps["in"]) > 0 else ""
+        out = json.dumps(list(self.deps["out"])) if len(self.deps["out"]) > 0 else ""
+
+        if len(self.wait_intervals) > 0:
+            start = self.start
+            cur_level = base_level + (max_levels - level)
+            for wait_interval in self.wait_intervals:
+                tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\t%s\t%s\n" % \
+                        (cur_level, start, 
+                         wait_interval.start, color, title, initiation,
+                         _in, out))
+                tsv_file.write("%d\t%ld\t%ld\t%s\t0.15\t%s\t%s\t%s\t%s\t%d\n" % \
+                        (cur_level, wait_interval.start,
+                         wait_interval.ready, color, title + " (waiting)", initiation, 
+                         _in, out, self.prof_uid))
+                tsv_file.write("%d\t%ld\t%ld\t%s\t0.45\t%s\t%s\t%s\t%s\n" % \
+                        (cur_level, wait_interval.ready,
+                         wait_interval.end, color, title + " (ready)", initiation,
+                         _in, out))
+                start = max(start, wait_interval.end)
+            if start < self.stop:
+                tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\t%s\t%s\n" % \
+                        (cur_level, start,
+                         self.stop, color, title, initiation, 
+                         _in, out))
+        else:
+            tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\t%s\t%s\t%d\n" % \
+                    (base_level + (max_levels - level),
+                     self.start, self.stop,
+                     color,title,initiation, _in, out, self.prof_uid))
+
+class Task(Operation, TimeRange, HasDependencies, HasWaiters):
+    def __init__(self, variant, op, create, ready, start, stop):
+        Operation.__init__(self, op.op_id)
+        HasDependencies.__init__(self)
+        HasWaiters.__init__(self)
+        TimeRange.__init__(self, create, ready, start, stop)
+
+        self.base_op = op
+        self.variant = variant
+        self.initiation = ''
+        self.is_task = True
+
+    def assign_color(self, color):
+        assert self.color is None
+        assert self.base_op.color is None
+        assert self.variant is not None
+        assert self.variant.color is not None
+        self.color = self.variant.color
+        self.base_op.color = self.color
+
+    def set_level(self, level):
+        self.level = level
+
+    def emit_tsv(self, tsv_file, base_level, max_levels, level):
+        return HasWaiters.emit_tsv(self, tsv_file, base_level, max_levels, level)
+
+    def get_color(self):
+        assert self.color is not None
+        return self.color
+
+    def get_op_id(self):
+        return self.op_id
+        
+    def get_info(self):
+        info = '<'+str(self.op_id)+">"
+        return info
 
     def get_timing(self):
         total_wait_time = 0
@@ -1244,11 +1160,58 @@ class MetaTask(object):
                 str(self.start)+' us stop='+str(self.stop)+' us'+ \
                 (' (wait for ' + str(total_wait_time) + ' us)' if total_wait_time > 0 else '')
 
-    def get_initiation(self):
-        return 'initiated by="'+repr(self.op)+'"'
+    def __repr__(self):
+        assert self.variant is not None
+        title = self.variant.task_kind.name if self.variant.task_kind is not None else 'unnamed'
+        if self.variant.name <> None and self.variant.name.find("unnamed") > 0:
+            title += ' ['+self.variant.name+']'
+        return title+' '+self.get_info()
+
+class MetaTask(Operation, TimeRange, HasInitiationDependencies, HasWaiters):
+    def __init__(self, variant, op, create, ready, start, stop):
+        Operation.__init__(self, None)
+        HasInitiationDependencies.__init__(self)
+        HasWaiters.__init__(self)
+        TimeRange.__init__(self, create, ready, start, stop)
+
+        self.variant = variant
+        self.initiation_op = op
+        self.initiation = op.op_id
+        self.is_task = True
+        self.is_meta = True
+
+    def get_color(self):
+        assert self.variant is not None
+        assert self.variant.color is not None
+        return self.variant.color
+
+    def emit_tsv(self, tsv_file, base_level, max_levels, level):
+        return HasWaiters.emit_tsv(self, tsv_file, base_level, max_levels, level)
 
     def __repr__(self):
+        assert self.variant is not None
         return self.variant.name
+
+class ProfTask(Base, TimeRange, HasNoDependencies):
+    def __init__(self, op, create, ready, start, stop):
+        Base.__init__(self)
+        HasNoDependencies.__init__(self)
+        TimeRange.__init__(self, None, ready, start, stop)
+        self.proftask_id = op.op_id
+        self.color = '#FFC0CB'  # Pink
+        self.is_task = True
+
+    def get_color(self):
+        return self.color
+
+    def emit_tsv(self, tsv_file, base_level, max_levels, level):
+        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%s\t%s\t%s\t%d\n" % \
+            (base_level + (max_levels - level),
+             self.start, self.stop,
+             self.get_color(), repr(self),"", "", "", self.prof_uid))
+
+    def __repr__(self):
+        return 'ProfTask' + (' <{:d}>'.format(self.proftask_id) if self.proftask_id > 0 else '')
 
 class UserMarker(object):
     def __init__(self, name):
@@ -1269,42 +1232,29 @@ class UserMarker(object):
     def __repr__(self):
         return 'User Marker "'+self.name+'"'
 
-class Copy(object):
-    def __init__(self, src, dst, op):
+class Copy(Operation, TimeRange, HasInitiationDependencies):
+    def __init__(self, src, dst, op, size, create, ready, start, stop):
+        Operation.__init__(self, None)
+        HasInitiationDependencies.__init__(self)
+        TimeRange.__init__(self, create, ready, start, stop)
         self.src = src
         self.dst = dst
-        self.op = op
-        self.has_op_id = False
-        self.has_op = True
-        self.size = None
-        self.create = None
-        self.ready = None
-        self.start = None
-        self.stop = None
+        self.initiation_op = op
+        self.initiation = op.op_id
+        self.size = size
         self.chan = None
-        self.deps = {"in": set(), "out": set()}
-        self.prof_uid = get_prof_uid()
 
     def get_color(self):
-        # Get the color from the operation
-        return self.op.get_color()
+        # Get the color from the initiator
+        return self.initiation_op.get_color()
 
     def __repr__(self):
-        return 'Copy size='+str(self.size) + '\t' + str(self.op.get_op_id())
+        return 'Copy size='+str(self.size)
 
     def get_unique_tuple(self):
         assert self.chan is not None
-        print(self.chan)
-        time = (self.stop - self.start) / 2 + self.start
         cur_level = self.chan.max_live_copies+1 - self.level
         return (str(self.chan), self.prof_uid)
-
-    def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
-        initiation_dependencies_helper(op_dependencies, transitive_map, self.get_unique_tuple)
-
-    def attach_dependencies(self, state, op_dependencies, transitive_map):
-        attach_dependenies_helper(state, op_dependencies, transitive_map,
-                                  self.deps, self)
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         assert self.level is not None
@@ -1313,53 +1263,40 @@ class Copy(object):
         copy_name = repr(self)
         _in = json.dumps(self.deps["in"]) if len(self.deps["in"]) > 0 else ""
         out = json.dumps(self.deps["out"]) if len(self.deps["out"]) > 0 else ""
-        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\t%d\n" % \
+        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%d\t%s\t%s\t%d\n" % \
                 (base_level + (max_levels - level),
-                self.start, self.stop,
-                self.get_color(), copy_name, _in, out, self.prof_uid))
+                 self.start, self.stop, self.get_color(), copy_name, 
+                 self.initiation, _in, out, self.prof_uid))
 
-class Fill(object):
-    def __init__(self, dst, op):
+class Fill(Operation, TimeRange, HasInitiationDependencies):
+    def __init__(self, dst, op, create, ready, start, stop):
+        Operation.__init__(self, None)
+        HasInitiationDependencies.__init__(self)
+        TimeRange.__init__(self, create, ready, start, stop)
         self.dst = dst
-        self.op = op
-        self.has_op_id = False
-        self.has_op = True
-        self.create = None
-        self.ready = None
-        self.start = None
-        self.stop = None
-        self.deps = {"in": set(), "out": set()}
-        self.prof_uid = get_prof_uid()
+        self.initiation_op = op
+        self.initiation = op.op_id
+        self.chan = None
 
     def get_color(self):
-        return self.op.get_color()
+        return self.initiation_op.get_color()
 
     def __repr__(self):
-        return 'Fill\t' + str(self.op.get_op_id())
+        return 'Fill'
 
     def get_unique_tuple(self):
-        assert self.dst is not None
-        print(self.dst)
-        time = (self.stop - self.start) / 2 + self.start
+        assert self.chan is not None
         cur_level = self.chan.max_live_copies+1 - self.level
         return (str(self.chan), self.prof_uid)
 
-    def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
-        initiation_dependencies_helper(op_dependencies, transitive_map, self.get_unique_tuple())
-
-    def attach_dependencies(self, state, op_dependencies, transitive_map):
-        attach_dependenies_helper(state, op_dependencies, transitive_map,
-                                  self.deps, self)
-
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         fill_name = repr(self)
-
         _in = json.dumps(self.deps["in"]) if len(self.deps["in"]) > 0 else ""
         out = json.dumps(self.deps["out"]) if len(self.deps["out"]) > 0 else ""
-        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\t%d\n" % \
-                (base_level + (max_levels - self.level),
-                self.start, self.stop,
-                self.get_color(), fill_name, _in, out, self.prof_uid))
+        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t%d\t%s\t%s\t%d\n" % \
+                (base_level + (max_levels - level),
+                 self.start, self.stop, self.get_color(), fill_name, 
+                 self.initiation, _in, out, self.prof_uid))
 
 class Instance(object):
     def __init__(self, inst_id, op):
@@ -1458,13 +1395,15 @@ class MessageKind(object):
         assert self.color is None
         self.color = color
 
-class Message(object):
+class Message(Base, TimeRange, HasNoDependencies):
     def __init__(self, kind, start, stop):
+        Base.__init__(self)
+        TimeRange.__init__(self, None, None, start, stop)
+        HasNoDependencies.__init__(self)
         self.kind = kind
-        self.has_op_id = False
-        self.has_op = False
-        self.start = start
-        self.stop = stop
+
+    def set_level(self, level):
+        self.level = level
 
     def get_timing(self):
         return 'total='+str(self.stop - self.start)+' us start='+ \
@@ -1485,25 +1424,39 @@ class MapperCallKind(object):
         assert self.color is None
         self.color = color
 
-class MapperCall(object):
+class MapperCall(Operation, TimeRange, HasInitiationDependencies):
     def __init__(self, kind, op, start, stop):
+        Operation.__init__(self, None)
+        TimeRange.__init__(self, None, None, start, stop)
+        HasInitiationDependencies.__init__(self)
+        self.initiation = op.op_id
         self.kind = kind
-        self.op = op
-        self.has_op_id = False
-        self.has_op = True
-        self.start = start
-        self.stop = stop
-        self.prof_uid = get_prof_uid()
+
+    def set_level(self, level):
+        self.level = level
+
+    def get_color(self):
+        assert self.kind is not None and self.kind.color is not None
+        return self.kind.color
+
+    def emit_tsv(self, tsv_file, base_level, max_levels, level):
+        title = repr(self)
+        _in = json.dumps(list(self.deps["in"])) if len(self.deps["in"]) > 0 else ""
+        out = json.dumps(list(self.deps["out"])) if len(self.deps["out"]) > 0 else ""
+        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\t%d\n" % \
+                (base_level + (max_levels - level),
+                 self.start, self.stop,
+                 self.get_color(),title,_in,out,self.prof_uid))
 
     def get_timing(self):
         return 'total='+str(self.stop - self.start)+' us start='+ \
                 str(self.start)+' us stop='+str(self.stop)+' us'
 
     def __repr__(self):
-        if self.op.op_id == 0:
+        if self.initiation == 0:
             return 'Mapper Call '+self.kind.desc
         else:
-            return 'Mapper Call '+self.kind.desc+' for '+repr(self.op) 
+            return 'Mapper Call '+self.kind.desc+' for '+str(self.initiation)
 
 class RuntimeCallKind(object):
     def __init__(self, runtime_call_kind, desc):
@@ -1517,14 +1470,19 @@ class RuntimeCallKind(object):
         assert self.color is None
         self.color = color
 
-class RuntimeCall(object):
+class RuntimeCall(Base, TimeRange, HasNoDependencies):
     def __init__(self, kind, start, stop):
+        Base.__init__(self)
+        TimeRange.__init__(self, None, None, start, stop)
+        HasNoDependencies.__init__(self)
         self.kind = kind
-        self.has_op_id = False
-        self.has_op = False
-        self.start = start
-        self.stop = stop
-        self.prof_uid = get_prof_uid()
+
+    def emit_tsv(self, tsv_file, base_level, max_levels, level):
+        title = repr(self)
+        tsv_file.write("%d\t%ld\t%ld\t%s\t1.0\t%s\t\t%s\t%s\t%d\n" % \
+                (base_level + (max_levels - level),
+                 self.start, self.stop,
+                 self.kind.color,title,"","",self.prof_uid))
 
     def get_timing(self):
         return 'total='+str(self.stop - self.start)+' us start='+ \
@@ -1532,84 +1490,6 @@ class RuntimeCall(object):
 
     def __repr__(self):
         return 'Runtime Call '+self.kind.desc
-
-class SVGPrinter(object):
-    def __init__(self, file_name, html_file):
-        self.target = open(file_name,'w')
-        self.file_name = basename(file_name)
-        self.html_file = html_file
-        assert self.target is not None
-        self.offset = 0
-        self.target.write('<svg xmlns="http://www.w3.org/2000/svg">\n')
-        self.max_width = 0
-        self.max_height = 0
-
-    def close(self):
-        self.emit_time_scale()
-        self.target.write('</svg>\n')
-        self.target.close()
-        # Round up the max width and max height to a multiple of 100
-        while ((self.max_width % 100) != 0):
-            self.max_width = self.max_width + 1
-        while ((self.max_height % 100) != 0):
-            self.max_height = self.max_height + 1
-        # Also emit the html file
-        html_target = open(self.html_file,'w')
-        html_target.write('<!DOCTYPE HTML PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"\n')
-        html_target.write('"DTD?xhtml1-transitional.dtd">\n')
-        html_target.write('<html>\n')
-        html_target.write('<head>\n')
-        html_target.write('<title>Legion Prof</title>\n')
-        html_target.write('</head>\n')
-        html_target.write('<body leftmargin="0" marginwidth="0" topmargin="0" marginheight="0" bottommargin="0">\n')
-        html_target.write('<embed src="'+self.file_name+'" width="'+str(self.max_width)+'px" height="'+str(self.max_height)+'px" type="image/svg+xml" />')
-        html_target.write('</body>\n')
-        html_target.write('</html>\n')
-        html_target.close()
-
-    def init_chunk(self, total_levels):
-        self.offset = self.offset + total_levels
-
-    def emit_timing_range(self, color, level, start, finish, title):
-        self.target.write('  <g>\n')
-        self.target.write('    <title>'+escape(title)+'</title>\n')
-        assert level <= self.offset
-        x_start = start//US_PER_PIXEL
-        x_length = (finish-start)//US_PER_PIXEL
-        y_start = (self.offset-level)*PIXELS_PER_LEVEL
-        y_length = PIXELS_PER_LEVEL
-        self.target.write('    <rect x="'+str(x_start)+'" y="'+str(y_start)+'" width="'+str(x_length)+'" height="'+str(y_length)+'"\n')
-        self.target.write('     fill="'+str(color)+'" stroke="black" stroke-width="1" />')
-        self.target.write('</g>\n')
-        if (x_start+x_length) > self.max_width:
-            self.max_width = x_start + x_length
-        if (y_start+y_length) > self.max_height:
-            self.max_height = y_start + y_length
-
-    def emit_time_scale(self):
-        x_end = self.max_width
-        y_val = int(float(self.offset + 1.5)*PIXELS_PER_LEVEL)
-        self.target.write('    <line x1="'+str(0)+'" y1="'+str(y_val)+'" x2="'+str(x_end)+'" y2="'+str(y_val)+'" stroke-width="2" stroke="black" />\n')
-        y_tick_max = y_val + int(0.2*PIXELS_PER_LEVEL)
-        y_tick_min = y_val - int(0.2*PIXELS_PER_LEVEL)
-        us_per_tick  = US_PER_PIXEL * PIXELS_PER_TICK
-        # Compute the number of tick marks
-        for idx in range(x_end // PIXELS_PER_TICK):
-            x_tick = idx*PIXELS_PER_TICK
-            self.target.write('    <line x1="'+str(x_tick)+'" y1="'+str(y_tick_min)+'" x2="'+str(x_tick)+'" y2="'+str(y_tick_max)+'" stroke-width="2" stroke="black" />\n')
-            title = "%d us" % (idx*us_per_tick)
-            self.target.write('    <text x="'+str(x_tick)+'" y="'+str(y_tick_max+int(0.2*PIXELS_PER_LEVEL))+'" fill="black">'+title+'</text>\n')
-        if (y_val+PIXELS_PER_LEVEL) > self.max_height:
-            self.max_height = y_val + PIXELS_PER_LEVEL
-
-    def emit_time_line(self, level, start, finish, title):
-        x_start = start//US_PER_PIXEL
-        x_end = finish//US_PER_PIXEL
-        y_val = int(float(self.offset-level + 0.7)*PIXELS_PER_LEVEL)
-        self.target.write('    <line x1="'+str(x_start)+'" y1="'+str(y_val)+'" x2="'+str(x_end)+'" y2="'+str(y_val)+'" stroke-width="2" stroke="black"/>')
-        self.target.write('    <text x="'+str(x_start)+'" y="'+str(y_val-int(0.2*PIXELS_PER_LEVEL))+'" fill="black">'+title+'</text>')
-        if ((self.offset-level)+1)*PIXELS_PER_LEVEL > self.max_height:
-            self.max_height = ((self.offset-level)+1)*PIXELS_PER_LEVEL
 
 class LFSR(object):
     def __init__(self, size):
@@ -1668,11 +1548,11 @@ class StatGatherer(object):
         if task.is_meta:
             if task.variant not in self.meta_tasks:
                 self.meta_tasks.add(task.variant)
-            task.variant.increment_calls(exec_time, proc)
         else:
             if task.variant not in self.application_tasks:
                 self.application_tasks.add(task.variant)
-            task.variant.increment_calls(exec_time, proc)
+
+        task.variant.increment_calls(exec_time, proc)
 
     def print_stats(self, verbose):
         print("  -------------------------")
@@ -1930,14 +1810,7 @@ class State(object):
     def log_task_info(self, op_id, variant_id, proc_id,
                       create, ready, start, stop):
         variant = self.find_variant(variant_id)
-        task = self.find_task(op_id, variant)
-        task.create = create
-        assert create <= ready
-        task.ready = ready
-        assert ready <= start
-        task.start = start
-        assert start <= stop
-        task.stop = stop
+        task = self.find_task(op_id, variant, create, ready, start, stop)
         if stop > self.last_time:
             self.last_time = stop
         proc = self.find_processor(proc_id)
@@ -1947,14 +1820,7 @@ class State(object):
                       create, ready, start, stop):
         op = self.find_op(op_id)
         variant = self.find_meta_variant(hlr)
-        meta = self.create_meta(variant, op)
-        meta.create = create
-        assert create <= ready
-        meta.ready = ready
-        assert ready <= start
-        meta.start = start
-        assert start <= stop
-        meta.stop = stop
+        meta = self.create_meta(variant, op, create, ready, start, stop)
         if stop > self.last_time:
             self.last_time = stop
         proc = self.find_processor(proc_id)
@@ -1965,15 +1831,7 @@ class State(object):
         op = self.find_op(op_id)
         src = self.find_memory(src_mem)
         dst = self.find_memory(dst_mem)
-        copy = self.create_copy(src, dst, op)
-        copy.size = size
-        copy.create = create
-        assert create <= ready
-        copy.ready = ready
-        assert ready <= start
-        copy.start = start
-        assert start <= stop
-        copy.stop = stop
+        copy = self.create_copy(src, dst, op, size, create, ready, start, stop)
         if stop > self.last_time:
             self.last_time = stop
         channel = self.find_channel(src, dst)
@@ -1983,14 +1841,7 @@ class State(object):
                       create, ready, start, stop):
         op = self.find_op(op_id)
         dst = self.find_memory(dst_mem)
-        fill = self.create_fill(dst, op)
-        fill.create = create
-        assert create <= ready
-        fill.ready = ready
-        assert ready <= start
-        fill.start = start
-        assert start <= stop
-        fill.stop = stop
+        fill = self.create_fill(dst, op, create, ready, start, stop)
         if stop > self.last_time:
             self.last_time = stop
         channel = self.find_channel(None, dst)
@@ -2052,12 +1903,12 @@ class State(object):
 
     def log_variant(self, task_id, variant_id, name):
         assert task_id in self.task_kinds
-        task = self.task_kinds[task_id]
+        task_kind = self.task_kinds[task_id]
         if variant_id not in self.variants:
             self.variants[variant_id] = Variant(variant_id, name)
         else:
             self.variants[variant_id].name = name
-        self.variants[variant_id].task = task
+        self.variants[variant_id].set_task_kind(task_kind)
 
     def log_operation(self, op_id, kind):
         op = self.find_op(op_id)
@@ -2127,8 +1978,8 @@ class State(object):
             return 
         if stop > self.last_time:
             self.last_time = stop
-        call = MapperCall(self.mapper_call_kinds[kind], 
-        self.find_op(op_id), start, stop)
+        call = MapperCall(self.mapper_call_kinds[kind],
+                          self.find_op(op_id), start, stop)
         proc = self.find_processor(proc_id)
         proc.add_mapper_call(call)
 
@@ -2146,19 +1997,11 @@ class State(object):
         proc.add_runtime_call(call)
 
     def log_proftask_info(self, proc_id, op_id, start, stop):
-        assert start <= stop
-        task = Operation(op_id)
-        # we don't have a unique op_id for the profiling task itself, so we don't add to
-        #  self.operations, but that means we have to pick a color here
-        task.color = '#FFC0CB'  # Pink
-        task.is_proftask = True
-        task.has_op_id = False
-        task.create = start
-        task.ready = start
-        task.start = start
-        task.stop = stop
+        # we don't have a unique op_id for the profiling task itself, so we don't 
+        # add to self.operations
+        proftask = ProfTask(Operation(op_id), start, start, start, stop) 
         proc = self.find_processor(proc_id)
-        proc.add_task(task)
+        proc.add_task(proftask)
 
     def find_processor(self, proc_id):
         if proc_id not in self.processors:
@@ -2198,26 +2041,31 @@ class State(object):
             self.operations[op_id] = Operation(op_id) 
         return self.operations[op_id]
 
-    def find_task(self, op_id, variant):
-        task = self.find_op(op_id)
+    def find_task(self, op_id, variant, create=None, ready=None, start=None, stop=None):
+        op = self.find_op(op_id)
         # Upgrade this operation to a task if necessary
-        if not task.is_task:
-            task.is_task = True
-            task.name = 'Task '+str(op_id) 
-            task.variant = variant
-            variant.op[op_id] = task
-        return task
+        if not op.is_task:
+            assert create is not None
+            assert ready is not None
+            assert start is not None
+            assert stop is not None
+            op = Task(variant, op, create, ready, start, stop) 
+            variant.op[op_id] = op
+            self.operations[op_id] = op
+        else:
+            assert op.variant == variant
+        return op
 
-    def create_meta(self, variant, op):
-        result = MetaTask(variant, op)
+    def create_meta(self, variant, op, create, ready, start, stop):
+        result = MetaTask(variant, op, create, ready, start, stop)
         variant.op[op.op_id] = result
         return result
 
-    def create_copy(self, src, dst, op):
-        return Copy(src, dst, op)
+    def create_copy(self, src, dst, op, size, create, ready, start, stop):
+        return Copy(src, dst, op, size, create, ready, start, stop)
 
-    def create_fill(self, dst, op):
-        return Fill(dst, op)
+    def create_fill(self, dst, op, create, ready, start, stop):
+        return Fill(dst, op, create, ready, start, stop)
 
     def create_instance(self, inst_id, op):
         # neither instance id nor op id are unique on their own
@@ -2236,7 +2084,7 @@ class State(object):
         assert self.last_time is not None 
         # Processors first
         for proc in self.processors.itervalues():
-            proc.init_time_range(self.last_time)
+            proc.last_time = self.last_time
             proc.sort_time_range()
         for mem in self.memories.itervalues():
             mem.init_time_range(self.last_time)
@@ -2249,7 +2097,7 @@ class State(object):
         print('****************************************************')
         print('   PROCESSOR STATS')
         print('****************************************************')
-        for p,proc in sorted(self.processors.iteritems()):
+        for proc in sorted(self.processors.itervalues()):
             proc.print_stats()
         print
 
@@ -2257,7 +2105,7 @@ class State(object):
         print('****************************************************')
         print('   MEMORY STATS')
         print('****************************************************')
-        for m,mem in sorted(self.memories.iteritems()):
+        for mem in sorted(self.memories.itervalues()):
             mem.print_stats()
         print
 
@@ -2265,7 +2113,7 @@ class State(object):
         print('****************************************************')
         print('   CHANNEL STATS')
         print('****************************************************')
-        for c,channel in sorted(self.channels.iteritems()):
+        for channel in sorted(self.channels.itervalues()):
             channel.print_stats()
         print
 
@@ -2274,8 +2122,6 @@ class State(object):
         print('   TASK STATS')
         print('****************************************************')
         stat = StatGatherer(self)
-        for proc in self.processors.itervalues():
-            proc.update_task_stats(stat)
         stat.print_stats(verbose)
         print
 
@@ -2323,25 +2169,6 @@ class State(object):
                       self.runtime_call_kinds):
             for kind in kinds.itervalues():
                 kind.assign_color(color_helper(lsfr.get_next(), num_colors))
-
-    def emit_visualization(self, output_prefix, show_procs,
-                           show_channels, show_instances):
-        self.assign_colors()
-        svg_file = output_prefix + '.svg'
-        html_file = output_prefix + '.html'
-        print('Generating visualization files %s and %s' % (svg_file,html_file))
-        # Make a printer and emit the files
-        printer = SVGPrinter(svg_file, html_file)
-        if show_procs:
-            for p,proc in sorted(self.processors.iteritems()):
-                proc.emit_svg(printer)
-        if show_channels:
-            for c,channel in sorted(self.channels.iteritems()):
-                channel.emit_svg(printer)
-        if show_instances:
-            for m,memory in sorted(self.memories.iteritems()):
-                memory.emit_svg(printer)
-        printer.close()
 
     def show_copy_matrix(self, output_prefix):
         template_file_name = os.path.join(dirname(sys.argv[0]),
@@ -2749,19 +2576,15 @@ class State(object):
         #     json.dump(op_dependencies, dep_json_file)
 
         ops_file = open(ops_file_name, "w")
-        ops_file.write("op_id\tdesc\ttime\tproc\tlevel\n")
+        ops_file.write("op_id\tdesc\tproc\tlevel\n")
         for op_id, operation in self.operations.iteritems():
-            time = 0
             proc = ""
             level = ""
-            if (operation.start is not None) and (operation.stop is not None):
-                time = operation.start + ((operation.stop - operation.start) / 2)
             if (operation.proc is not None):
                 proc = repr(operation.proc)
                 level = str(operation.level+1)
-            ops_file.write("%d\t%s\t%d\t%s\t%s\n" % \
-                            (op_id, str(operation),
-                             time, proc, level))
+            ops_file.write("%d\t%s\t%s\t%s\n" % \
+                            (op_id, str(operation), proc, level))
         ops_file.close()
 
         if show_procs:
@@ -2787,7 +2610,7 @@ class State(object):
                     }
                     proc_list.append(proc)
 
-                    last_time = max(last_time, proc.full_range.stop_time)
+                    last_time = max(last_time, proc.last_time)
         if show_channels:
             for c,chan in sorted(self.channels.iteritems(), key=lambda x: x[1]):
                 if len(chan.copies) > 0:
@@ -2901,7 +2724,6 @@ def main():
     copy_output_prefix = output_dirname + "_copy"
     print_stats = args.print_stats
     verbose = args.verbose
-    interactive_timeline = True
 
     state = State()
     has_matches = False
@@ -2921,16 +2743,10 @@ def main():
     if print_stats:
         state.print_stats(verbose) 
     else:
-        if not interactive_timeline:
-            state.emit_visualization(output_dirname, show_procs, 
-                                     show_channels, show_instances) 
-
-        if interactive_timeline:
-            state.emit_interactive_visualization(output_dirname, show_procs,
-                                 file_names, show_channels, show_instances, force)
+        state.emit_interactive_visualization(output_dirname, show_procs,
+                             file_names, show_channels, show_instances, force)
         if show_copy_matrix:
             state.show_copy_matrix(copy_output_prefix)
 
 if __name__ == '__main__':
     main()
-
