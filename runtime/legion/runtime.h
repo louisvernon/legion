@@ -446,8 +446,9 @@ namespace Legion {
       void perform_rank_exchange(void);
       void handle_mpi_rank_exchange(Deserializer &derez);
     protected:
-      void send_stage(int stage) const;
-      bool unpack_exchange(int stage, Deserializer &derez);
+      void send_explicit_stage(int stage);
+      bool send_ready_stages(void);
+      void unpack_exchange(int stage, Deserializer &derez);
     public:
       Runtime *const runtime;
       const bool participating;
@@ -458,6 +459,7 @@ namespace Legion {
       Reservation reservation;
       RtUserEvent done_event;
       std::vector<int> stage_notifications;
+      std::vector<bool> sent_stages;
     };
 
     /**
@@ -826,13 +828,14 @@ namespace Legion {
       VirtualChannel& operator=(const VirtualChannel &rhs);
     public:
       void package_message(Serializer &rez, MessageKind k, bool flush,
-                           Runtime *runtime, Processor target, bool shutdown);
+                           Runtime *runtime, Processor target, 
+                           bool response, bool shutdown);
       void process_message(const void *args, size_t arglen, 
                         Runtime *runtime, AddressSpaceID remote_address_space);
       void confirm_shutdown(ShutdownManager *shutdown_manager, bool phase_one);
     private:
       void send_message(bool complete, Runtime *runtime, 
-                        Processor target, bool shutdown);
+                        Processor target, bool response, bool shutdown);
       void handle_messages(unsigned num_messages, Runtime *runtime, 
                            AddressSpaceID remote_address_space,
                            const char *args, size_t arglen);
@@ -889,7 +892,7 @@ namespace Legion {
     public:
       void send_message(Serializer &rez, MessageKind kind, 
                         VirtualChannelKind channel, bool flush, 
-                        bool shutdown = false);
+                        bool response = false, bool shutdown = false);
       void receive_message(const void *args, size_t arglen);
       void confirm_shutdown(ShutdownManager *shutdown_manager,
                             bool phase_one);
@@ -2894,6 +2897,8 @@ namespace Legion {
       static int legion_collective_log_radix;
       static int legion_collective_stages;
       static int legion_collective_participating_spaces;
+      static int legion_collective_last_radix;
+      static int legion_collective_last_log_radix;
       // MPI Interoperability
       static int mpi_rank;
       static MPIRankTable *mpi_rank_table;
