@@ -1208,6 +1208,16 @@ namespace Legion {
       // These will be ignored outside of static traces
       const std::vector<StaticDependence> *static_dependences;
     public:
+      // Users can tell the runtime this task is eligible
+      // for inlining by the mapper. This will invoke the 
+      // select_task_options call inline as part of the launch
+      // logic for this task to allow the mapper to decide
+      // whether to inline the task or not. Note that if the
+      // mapper pre-empts during execution then resuming it
+      // may take a long time if another long running task
+      // gets scheduled on the processor that launched this task.
+      bool                               enable_inlining;
+    public:
       // Users can inform the runtime that all region requirements
       // are independent of each other in this task. Independent
       // means that either field sets are independent or region
@@ -1281,6 +1291,16 @@ namespace Legion {
       // Inform the runtime about any static dependences
       // These will be ignored outside of static traces
       const std::vector<StaticDependence> *static_dependences;
+    public:
+      // Users can tell the runtime this task is eligible
+      // for inlining by the mapper. This will invoke the 
+      // select_task_options call inline as part of the launch
+      // logic for this task to allow the mapper to decide
+      // whether to inline the task or not. Note that if the
+      // mapper pre-empts during execution then resuming it
+      // may take a long time if another long running task
+      // gets scheduled on the processor that launched this task.
+      bool                               enable_inlining;
     public:
       // Users can inform the runtime that all region requirements
       // are independent of each other in this task. Independent
@@ -5124,7 +5144,7 @@ namespace Legion {
        *              runtime.  Default value is 4K which should guarantee
        *              medium sized active messages on Infiniband clusters.
        * ---------------------
-       *  Dependence Analysis
+       *  Configuration Flags 
        * ---------------------
        * -lg:no_dyn   Disable dynamic disjointness tests when the runtime
        *              has been compiled with macro DYNAMIC_TESTS defined
@@ -5151,6 +5171,8 @@ namespace Legion {
        *              checks on mapper calls regardless of the 
        *              optimization level. (Default: true in debug mode,
        *              false in release mode.)
+       * -lg:local <int> Specify the maximum number of local fields
+       *              permitted in any field space within a context.
        * ---------------------
        *  Resiliency
        * ---------------------

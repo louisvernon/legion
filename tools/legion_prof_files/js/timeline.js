@@ -187,7 +187,7 @@ function getLineColor(elem) {
     "(CPU)": "steelblue",
     "(GPU)": "olivedrab",
     "(Utility)": "crimson",
-    "(I/O)": "orangered"
+    "(IO)": "orangered"
   };
   return colorMap[kind];
 }
@@ -312,6 +312,9 @@ function drawLoaderIcon() {
       dur: "0.5s",
       repeatCount: "indefinite"
     });
+    state.loaderSvg.select("g").attr("visibility", "hidden");
+    state.loaderSvg.attr("width", "0px")
+                   .attr("height", "0px");
 }
 
 function showLoaderIcon() {
@@ -354,11 +357,6 @@ function getMouseOver() {
     if ((d.in.length != 0) || (d.out.length != 0)) {
       d3.select(this).style("cursor", "pointer")
     }
-
-    if ((d.in.length != 0) || (d.out.length != 0)) {
-      d3.select(this).style("cursor", "pointer")
-    }
-
     // descTexts is an array of Texts we will store in the desc view
     var descTexts = [];
     var total = d.end - d.start;
@@ -1423,7 +1421,7 @@ function defaultKeyUp(e) {
 }
 
 function load_proc_timeline(proc) {
-  var proc_name = proc.text;
+  var proc_name = proc.full_text;
   state.processorData[proc_name] = {};
   d3.tsv(proc.tsv,
     function(d, i) {

@@ -34,13 +34,6 @@ namespace Legion {
     class TaskContext : public ContextInterface, 
                         public ResourceTracker, public Collectable {
     public:
-      struct ReclaimLocalFieldArgs : public LgTaskArgs<ReclaimLocalFieldArgs> {
-      public:
-        static const LgTaskID TASK_ID = LG_RECLAIM_LOCAL_FIELD_ID;
-      public:
-        FieldSpace handle;
-        FieldID fid;
-      };
       struct PostEndArgs : public LgTaskArgs<PostEndArgs> {
       public:
         static const LgTaskID TASK_ID = LG_POST_END_ID;
@@ -511,7 +504,8 @@ namespace Legion {
       inline void begin_task_wait(bool from_runtime);
       inline void end_task_wait(void);
       void execute_task_launch(TaskOp *task, bool index, 
-                             LegionTrace *current_trace, bool silence_warnings);
+                               LegionTrace *current_trace, 
+                               bool silence_warnings, bool inlining_enabled);
       void remap_unmapped_regions(LegionTrace *current_trace,
                            const std::vector<PhysicalRegion> &unmapped_regions);
     public:
@@ -614,6 +608,20 @@ namespace Legion {
         InstanceView **target;
         RtUserEvent to_trigger;
         AddressSpaceID source;
+      };
+      struct LocalFieldInfo {
+      public:
+        LocalFieldInfo(void)
+          : fid(0), size(0), serdez(0), index(0), ancestor(false) { }
+        LocalFieldInfo(FieldID f, size_t s, CustomSerdezID z, 
+                       unsigned idx, bool a)
+          : fid(f), size(s), serdez(z), index(idx), ancestor(a) { }
+      public:
+        FieldID fid;
+        size_t size;
+        CustomSerdezID serdez;
+        unsigned index;
+        bool ancestor;
       };
     public:
       InnerContext(Runtime *runtime, TaskOp *owner, bool full_inner,
@@ -931,6 +939,9 @@ namespace Legion {
       void send_remote_context(AddressSpaceID remote_instance, 
                                RemoteContext *target);
     public:
+      void clone_local_fields(
+          std::map<FieldSpace,std::vector<LocalFieldInfo> > &child_local) const;
+    public:
       const RegionTreeContext tree_context; 
       const UniqueID context_uid;
       const bool remote_context;
@@ -994,6 +1005,9 @@ namespace Legion {
       // Tracking information for dynamic collectives
       std::map<unsigned long/*ID*/,std::map<unsigned/*gen*/,
                std::vector<Future> > > collective_contributions;
+    protected:
+      // Track information for locally allocated fields
+      std::map<FieldSpace,std::vector<LocalFieldInfo> > local_fields;
     };
 
     /**
@@ -1083,6 +1097,9 @@ namespace Legion {
                                                AddressSpaceID source);
       virtual void find_parent_version_info(unsigned index, unsigned depth, 
                   const FieldMask &version_mask, VersionInfo &version_info);
+    public:
+      void unpack_local_field_update(Deserializer &derez);
+      static void handle_local_field_update(Deserializer &derez);
     protected:
       UniqueID parent_context_uid;
       TaskContext *parent_ctx;
