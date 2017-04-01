@@ -22,6 +22,7 @@ import legion_spy
 import argparse
 import sys, os, shutil
 import string, re, json, heapq, time, itertools
+from collections import defaultdict
 from math import sqrt, log
 from cgi import escape
 from operator import itemgetter
@@ -250,38 +251,27 @@ class TimeRange(object):
             return True
         return False
 
-    # mapper_time is overrided by MapperCallRange to be non-zero
-    def mapper_time(self):
-        return 0
-
-    def total_time(self):
-        return self.stop - self.start
 
     def __repr__(self):
         return "Start: %d us  Stop: %d us  Total: %d us" % (
                 self.start, self.end, self.total_time())
 
-    def active_time(self):
-        return self.total_time()
 
-    # TODO
+    def total_time(self):
+        return self.stop - self.start
+
+    # The following must be overridden by subclasses that need them
+    def mapper_time(self):
+        pass
+
+    def active_time(self):
+        pass
+
     def application_time(self):
-        if self.task.is_meta:
-            # Add up the application time from all subranges
-            total = 0
-            return total
-        else:
-            # Take our total minus meta time plus application time
-            total = self.total_time()
-            return total
+        pass
 
     def meta_time(self):
-        if self.task.is_meta:
-            total = self.total_time()
-            return total
-        else:
-            total = 0
-            return total
+        pass
 
 class Processor(object):
     def __init__(self, proc_id, kind):
@@ -358,9 +348,10 @@ class Processor(object):
         return base_level + max(self.max_levels, 1) + 1
 
     def total_time(self):
-        assert self.full_range is not None
-        return self.full_range.total_time()
-
+        total = 0
+        for task in self.tasks:
+            total += task.total_time()
+        return total
 
     def active_time(self):
         total = 0
@@ -386,23 +377,33 @@ class Processor(object):
             total += task.mapper_time()
         return total
 
-    def print_stats(self):
+    def print_stats(self, verbose):
         total_time = self.total_time()
-        active_time = self.active_time()
-        application_time = self.application_time()
-        meta_time = self.meta_time()
-        mapper_time = self.mapper_time()
-        active_ratio = 100.0*float(active_time)/float(total_time)
-        application_ratio = 100.0*float(application_time)/float(total_time)
-        meta_ratio = 100.0*float(meta_time)/float(total_time)
-        mapper_ratio = 100.0*float(mapper_time)/float(total_time)
-        print(self)
-        print("    Total time: %d us" % total_time)
-        print("    Active time: %d us (%.3f%%)" % (active_time, active_ratio))
-        print("    Application time: %d us (%.3f%%)" % (application_time, application_ratio))
-        print("    Meta time: %d us (%.3f%%)" % (meta_time, meta_ratio))
-        print("    Mapper time: %d us (%.3f%%)" % (mapper_time, mapper_ratio))
-        print()
+        active_time = 0
+        application_time = 0
+        meta_time = 0
+        mapper_time = 0
+        active_ratio = 0.0
+        application_ratio = 0.0
+        meta_ratio = 0.0
+        mapper_ratio = 0.0
+        if total_time != 0:
+            active_time = self.active_time()
+            application_time = self.application_time()
+            meta_time = self.meta_time()
+            mapper_time = self.mapper_time()
+            active_ratio = 100.0*float(active_time)/float(total_time)
+            application_ratio = 100.0*float(application_time)/float(total_time)
+            meta_ratio = 100.0*float(meta_time)/float(total_time)
+            mapper_ratio = 100.0*float(mapper_time)/float(total_time)
+        if total_time != 0 or verbose:
+            print(self)
+            print("    Total time: %d us" % total_time)
+            print("    Active time: %d us (%.3f%%)" % (active_time, active_ratio))
+            print("    Application time: %d us (%.3f%%)" % (application_time, application_ratio))
+            print("    Meta time: %d us (%.3f%%)" % (meta_time, meta_ratio))
+            print("    Mapper time: %d us (%.3f%%)" % (mapper_time, mapper_ratio))
+            print()
 
     def __repr__(self):
         return '%s Processor %s' % (self.kind, hex(self.proc_id))
@@ -494,7 +495,7 @@ class Memory(object):
         # return base_level + max_levels
 
 
-    def print_stats(self):
+    def print_stats(self, verbose):
         # Compute total and average utilization of memory
         assert self.last_time is not None
         average_usage = 0.0
@@ -518,11 +519,12 @@ class Memory(object):
             previous_time = point.time
         # Last interval is empty so don't worry about it
         average_usage /= float(self.last_time) 
-        print(self)
-        print("    Total Instances: %d" % len(self.instances))
-        print("    Maximum Utilization: %.3f%%" % (100.0 * max_usage))
-        print("    Average Utilization: %.3f%%" % (100.0 * average_usage))
-        print()
+        if average_usage > 0.0 or verbose:
+            print(self)
+            print("    Total Instances: %d" % len(self.instances))
+            print("    Maximum Utilization: %.3f%%" % (100.0 * max_usage))
+            print("    Average Utilization: %.3f%%" % (100.0 * average_usage))
+            print()
   
     def __repr__(self):
         return '%s Memory %s' % (self.kind, hex(self.mem_id))
@@ -598,7 +600,7 @@ class Channel(object):
         #                  copy.get_color(), copy_name))
         # return base_level + max_levels
 
-    def print_stats(self):
+    def print_stats(self, verbose):
         assert self.last_time is not None 
         total_usage_time = 0
         max_transfers = 0
@@ -616,11 +618,12 @@ class Channel(object):
                 if current_transfers == 0:
                     total_usage_time += (point.time - previous_time)
         average_usage = float(total_usage_time)/float(self.last_time)
-        print(self)
-        print("    Total Transfers: %d" % len(self.copies))
-        print("    Maximum Executing Transfers: %d" % (max_transfers))
-        print("    Average Utilization: %.3f%%" % (100.0 * average_usage))
-        print()
+        if average_usage > 0.0 or verbose:
+            print(self)
+            print("    Total Transfers: %d" % len(self.copies))
+            print("    Maximum Executing Transfers: %d" % (max_transfers))
+            print("    Average Utilization: %.3f%%" % (100.0 * average_usage))
+            print()
         
     def __repr__(self):
         if self.src is None:
@@ -645,52 +648,34 @@ class TaskKind(object):
     def __repr__(self):
         return self.name
 
-class Variant(object):
-    def __init__(self, variant_id, name):
-        self.variant_id = variant_id
-        self.name = name
-        self.op = dict()
-        self.task_kind = None
-        self.color = None
-        self.total_calls = dict()
-        self.total_execution_time = dict()
-        self.all_calls = dict()
-        self.max_call = dict()
-        self.min_call = dict()
+class StatObject(object):
+    def __init__(self):
+        self.total_calls = defaultdict(int)
+        self.total_execution_time = defaultdict(int)
+        self.all_calls = defaultdict(list)
+        self.max_call = defaultdict(int)
+        self.min_call = defaultdict(int)
 
-    def __eq__(self, other):
-        return self.variant_id == other.variant_id
+    def get_total_execution_time(self):
+        total_execution_time = 0
+        for proc_exec_time in self.total_execution_time.itervalues():
+            total_execution_time += proc_exec_time
+        return total_execution_time
 
-    def set_task_kind(self, task_kind):
-        assert self.task_kind == None or self.task_kind == task_kind
-        self.task_kind = task_kind
-
-    def compute_color(self, step, num_steps):
-        assert self.color is None
-        self.color = color_helper(step, num_steps)
-
-    def assign_color(self, color):
-        assert self.color is None
-        self.color = color
-
-    def total_time(self):
-        return self.total_execution_time
+    def get_total_calls(self):
+        total_calls = 0
+        for proc_calls in self.total_calls.itervalues():
+            total_calls += proc_calls
+        return total_calls
 
     def increment_calls(self, exec_time, proc):
-        if proc not in self.total_calls:
-            self.total_calls[proc] = 1
-            self.total_execution_time[proc] = exec_time
-            self.all_calls[proc] = [exec_time]
+        self.total_calls[proc] += 1
+        self.total_execution_time[proc] += exec_time
+        self.all_calls[proc].append(exec_time)
+        if exec_time > self.max_call[proc]:
             self.max_call[proc] = exec_time
+        if exec_time < self.min_call[proc]:
             self.min_call[proc] = exec_time
-        else:
-            self.total_calls[proc] += 1
-            self.total_execution_time[proc] += exec_time
-            self.all_calls[proc].append(exec_time)
-            if exec_time > self.max_call[proc]:
-                self.max_call[proc] = exec_time
-            if exec_time < self.min_call[proc]:
-                self.min_call[proc] = exec_time
 
     def print_task_stat(self, total_calls, total_execution_time,
             max_call, max_dev, min_call, min_dev):
@@ -702,24 +687,17 @@ class Variant(object):
         print('       Maximum Time: %d us (%.3f sig)' % (max_call,max_dev))
         print('       Minimum Time: %d us (%.3f sig)' % (min_call,min_dev))
 
-
     def print_stats(self, verbose):
         procs = sorted(self.total_calls.iterkeys())
-        total_execution_time = 0
-        total_calls = 0
-
-        for proc in procs:
-            total_execution_time += self.total_execution_time[proc]
-            total_calls += self.total_calls[proc]
+        total_execution_time = self.get_total_execution_time()
+        total_calls = self.get_total_calls()
 
         avg = float(total_execution_time) / float(total_calls)
+        max_call = max(self.max_call.values())
+        min_call = min(self.min_call.values())
         stddev = 0
-        max_call = self.max_call[procs[0]]
-        min_call = self.min_call[procs[0]]
-        for proc in procs:
-            max_call = max(max_call, self.max_call[proc])
-            min_call = min(min_call, self.min_call[proc])
-            for call in self.all_calls[proc]:
+        for proc_calls in self.all_calls.values():
+            for call in proc_calls:
                 diff = float(call) - avg
                 stddev += sqrt(diff * diff)
         stddev /= float(total_calls)
@@ -727,7 +705,7 @@ class Variant(object):
         max_dev = (float(max_call) - avg) / stddev if stddev != 0.0 else 0.0
         min_dev = (float(min_call) - avg) / stddev if stddev != 0.0 else 0.0
 
-        print('  '+self.name)
+        print('  '+repr(self))
         self.print_task_stat(total_calls, total_execution_time,
                 max_call, max_dev, min_call, min_dev)
         print()
@@ -752,6 +730,34 @@ class Variant(object):
                         self.min_call[proc], min_dev)
                 print()
 
+
+class Variant(StatObject):
+    def __init__(self, variant_id, name):
+        StatObject.__init__(self)
+        self.variant_id = variant_id
+        self.name = name
+        self.op = dict()
+        self.task_kind = None
+        self.color = None
+
+    def __eq__(self, other):
+        return self.variant_id == other.variant_id
+
+    def set_task_kind(self, task_kind):
+        assert self.task_kind == None or self.task_kind == task_kind
+        self.task_kind = task_kind
+
+    def compute_color(self, step, num_steps):
+        assert self.color is None
+        self.color = color_helper(step, num_steps)
+
+    def assign_color(self, color):
+        assert self.color is None
+        self.color = color
+
+    def __repr__(self):
+        return self.name
+
 class Base(object):
     def __init__(self):
         self.prof_uid = get_prof_uid()
@@ -769,8 +775,6 @@ class Operation(Base):
     def __init__(self, op_id):
         Base.__init__(self)
         self.op_id = op_id
-        self.has_op_id = True
-        self.has_op = False
         self.kind_num = None
         self.kind = None
         self.is_task = False
@@ -806,14 +810,6 @@ class Operation(Base):
         info = '<'+str(self.op_id)+">"
         return info
 
-    def get_timing(self):
-        total_wait_time = 0
-        for interval in self.wait_intervals:
-            total_wait_time += interval.end - interval.start
-        return 'total='+str(self.stop - self.start)+' us start='+ \
-                str(self.start)+' us stop='+str(self.stop)+' us'+ \
-                (' (wait for ' + str(total_wait_time) + ' us)' if total_wait_time > 0 else '')
-
     def __repr__(self):
         if self.is_task:
             assert self.variant is not None
@@ -841,6 +837,16 @@ class HasWaiters(object):
 
     def add_wait_interval(self, start, ready, end):
         self.wait_intervals.append(WaitInterval(start, ready, end))
+
+    def active_time(self):
+        active_time = 0
+        start = self.start
+        for wait_interval in self.wait_intervals:
+            active_time += (wait_interval.start - start)
+            start = max(start, wait_interval.end)
+        if start < self.stop:
+            active_time += (self.stop - start)
+        return active_time
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         title = repr(self)
@@ -949,13 +955,17 @@ class Task(Operation, TimeRange, HasDependencies, HasWaiters):
         info = '<'+str(self.op_id)+">"
         return info
 
-    def get_timing(self):
-        total_wait_time = 0
-        for interval in self.wait_intervals:
-            total_wait_time += interval.end - interval.start
-        return 'total='+str(self.stop - self.start)+' us start='+ \
-                str(self.start)+' us stop='+str(self.stop)+' us'+ \
-                (' (wait for ' + str(total_wait_time) + ' us)' if total_wait_time > 0 else '')
+    def active_time(self):
+        return HasWaiters.active_time(self)
+
+    def application_time(self):
+        return self.total_time()
+
+    def meta_time(self):
+        return 0
+
+    def mapper_time(self):
+        return 0
 
     def __repr__(self):
         assert self.variant is not None
@@ -980,6 +990,18 @@ class MetaTask(Base, TimeRange, HasInitiationDependencies, HasWaiters):
         assert self.variant.color is not None
         return self.variant.color
 
+    def active_time(self):
+        return HasWaiters.active_time(self)
+
+    def application_time(self):
+        return self.total_time()
+
+    def meta_time(self):
+        return 0
+
+    def mapper_time(self):
+        return 0
+
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         return HasWaiters.emit_tsv(self, tsv_file, base_level, max_levels, level)
 
@@ -998,6 +1020,18 @@ class ProfTask(Base, TimeRange, HasNoDependencies):
 
     def get_color(self):
         return self.color
+
+    def active_time(self):
+        return self.total_time()
+
+    def application_time(self):
+        return 0
+
+    def meta_time(self):
+        return self.total_time()
+
+    def mapper_time(self):
+        return 0
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         tsv_line = data_tsv_str(level = base_level + (max_levels - level),
@@ -1027,9 +1061,17 @@ class UserMarker(Base, TimeRange, HasNoDependencies):
     def get_color(self):
         return self.color
 
-    def get_timing(self):
-        return 'total='+str(self.stop - self.start)+' us start='+ \
-                str(self.start)+' us stop='+str(self.stop)+' us'
+    def active_time(self):
+        return self.total_time()
+
+    def application_time(self):
+        return 0
+
+    def meta_time(self):
+        return self.total_time()
+
+    def mapper_time(self):
+        return 0
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         tsv_line = data_tsv_str(level = base_level + (max_levels - level),
@@ -1186,17 +1228,22 @@ class Instance(Base, TimeRange, HasInitiationDependencies):
                 .format(str(hex(self.inst_id)),
                         size_pretty))
 
-class MessageKind(object):
+class MessageKind(StatObject):
     def __init__(self, message_id, desc):
+        StatObject.__init__(self)
         self.message_id = message_id
-        self.has_op_id = False
-        self.has_op = False
         self.desc = desc
         self.color = None
+
+    def __eq__(self, other):
+        return self.message_id == other.message_id
 
     def assign_color(self, color):
         assert self.color is None
         self.color = color
+
+    def __repr__(self):
+        return self.desc
 
 class Message(Base, TimeRange, HasNoDependencies):
     def __init__(self, kind, start, stop):
@@ -1208,9 +1255,17 @@ class Message(Base, TimeRange, HasNoDependencies):
     def get_color(self):
         return self.kind.color
 
-    def get_timing(self):
-        return 'total='+str(self.stop - self.start)+' us start='+ \
-                str(self.start)+' us stop='+str(self.stop)+' us'
+    def active_time(self):
+        return self.total_time()
+
+    def application_time(self):
+        return 0
+
+    def meta_time(self):
+        return 0
+
+    def mapper_time(self):
+        return 0
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         tsv_line = data_tsv_str(level = base_level + (max_levels - level),
@@ -1225,27 +1280,21 @@ class Message(Base, TimeRange, HasNoDependencies):
                                 prof_uid = self.prof_uid)
         tsv_file.write(tsv_line)
 
-    def active_time(self):
-        return self.total_time()
-
-    def application_time(self):
-        return 0
-
-    # TODO
-    def meta_time(self):
-        total = self.total_time()
-        return total
-
     def __repr__(self):
-        return 'Message '+self.kind.desc
+        return 'Message '+str(self.kind)
 
-class MapperCallKind(object):
+class MapperCallKind(StatObject):
     def __init__(self, mapper_call_kind, desc):
+        StatObject.__init__(self)
         self.mapper_call_kind = mapper_call_kind
-        self.has_op_id = False
-        self.has_op = False
         self.desc = desc
         self.color = None
+
+    def __eq__(self, other):
+        return self.mapper_call_kind == other.mapper_call_kind
+
+    def __repr__(self):
+        return self.desc
 
     def assign_color(self, color):
         assert self.color is None
@@ -1280,41 +1329,40 @@ class MapperCall(Base, TimeRange, HasInitiationDependencies):
 
         tsv_file.write(tsv_line)
 
-    def get_timing(self):
-        return 'total='+str(self.stop - self.start)+' us start='+ \
-                str(self.start)+' us stop='+str(self.stop)+' us'
-
-    def mapper_time(self):
-        return self.total_time()
-
     def active_time(self):
         return self.total_time()
 
     def application_time(self):
         return 0
 
-    # TODO
     def meta_time(self):
-        total = self.total_time()
-        return total
+        return 0
+
+    def mapper_time(self):
+        return self.total_time()
 
     def __repr__(self):
         if self.initiation == 0:
-            return 'Mapper Call '+self.kind.desc
+            return 'Mapper Call '+str(self.kind)
         else:
-            return 'Mapper Call '+self.kind.desc+' for '+str(self.initiation)
+            return 'Mapper Call '+str(self.kind)+' for '+str(self.initiation)
 
-class RuntimeCallKind(object):
+class RuntimeCallKind(StatObject):
     def __init__(self, runtime_call_kind, desc):
+        StatObject.__init__(self)
         self.runtime_call_kind = runtime_call_kind
-        self.has_op_id = False
-        self.has_op = False
         self.desc = desc
         self.color = None
+
+    def __eq__(self, other):
+        return self.runtime_call_kind == other.runtime_call_kind
 
     def assign_color(self, color):
         assert self.color is None
         self.color = color
+
+    def __repr__(self):
+        return self.desc
 
 class RuntimeCall(Base, TimeRange, HasNoDependencies):
     def __init__(self, kind, start, stop):
@@ -1337,23 +1385,20 @@ class RuntimeCall(Base, TimeRange, HasNoDependencies):
 
         tsv_file.write(tsv_line)
 
-    def get_timing(self):
-        return 'total='+str(self.stop - self.start)+' us start='+ \
-                str(self.start)+' us stop='+str(self.stop)+' us'
-
     def active_time(self):
         return self.total_time()
 
     def application_time(self):
         return 0
 
-    # TODO
     def meta_time(self):
-        total = self.total_time()
-        return total
+        return self.total_time()
+
+    def mapper_time(self):
+        return 0
 
     def __repr__(self):
-        return 'Runtime Call '+self.kind.desc
+        return 'Runtime Call '+str(self.kind)
 
 class LFSR(object):
     def __init__(self, size):
@@ -1406,31 +1451,67 @@ class StatGatherer(object):
         self.state = state
         self.application_tasks = set()
         self.meta_tasks = set()
-
-    def record_task(self, task, exec_time, proc):
-        assert task.variant is not None
-        if task.is_meta:
-            if task.variant not in self.meta_tasks:
-                self.meta_tasks.add(task.variant)
-        else:
-            if task.variant not in self.application_tasks:
-                self.application_tasks.add(task.variant)
-
-        task.variant.increment_calls(exec_time, proc)
+        self.mapper_tasks = set()
+        self.runtime_tasks = set()
+        self.message_tasks = set()
+        for proc in state.processors.itervalues():
+            for task in proc.tasks:
+                if isinstance(task, Task):
+                    self.application_tasks.add(task.variant)
+                    task.variant.increment_calls(task.total_time(), proc)
+                elif isinstance(task, MetaTask):
+                    self.meta_tasks.add(task.variant)
+                    task.variant.increment_calls(task.total_time(), proc)
+                elif isinstance(task, MapperCall):
+                    self.mapper_tasks.add(task.kind)
+                    task.kind.increment_calls(task.total_time(), proc)
+                elif isinstance(task, RuntimeCall):
+                    self.runtime_tasks.add(task.kind)
+                    task.kind.increment_calls(task.total_time(), proc)
+                elif isinstance(task, Message):
+                    self.message_tasks.add(task.kind)
+                    task.kind.increment_calls(task.total_time(), proc)
 
     def print_stats(self, verbose):
         print("  -------------------------")
         print("  Task Statistics")
         print("  -------------------------")
         for variant in sorted(self.application_tasks,
-                                key=lambda v: v.total_time(),reverse=True):
+                                key=lambda v: v.get_total_execution_time(),
+                                reverse=True):
             variant.print_stats(verbose)
         print("  -------------------------")
         print("  Meta-Task Statistics")
         print("  -------------------------")
         for variant in sorted(self.meta_tasks,
-                                key=lambda v: v.total_time(),reverse=True):
+                                key=lambda v: v.get_total_execution_time(),
+                                reverse=True):
             variant.print_stats(verbose)
+        print("  -------------------------")
+        print("  Mapper Statistics")
+        print("  -------------------------")
+        for kind in sorted(self.mapper_tasks,
+                           key=lambda k: k.get_total_execution_time(),
+                           reverse=True):
+            kind.print_stats(verbose)
+
+        print("  -------------------------")
+        print("  Message Statistics")
+        print("  -------------------------")
+        for kind in sorted(self.message_tasks,
+                           key=lambda k: k.get_total_execution_time(),
+                           reverse=True):
+            kind.print_stats(verbose)
+
+        if len(self.runtime_tasks) > 0:
+            print("  -------------------------")
+            print("  Runtime Statistics")
+            print("  -------------------------")
+            for kind in sorted(self.runtime_tasks,
+                               key=lambda k: k.get_total_execution_time(),
+                               reverse=True):
+                kind.print_stats(verbose)
+
 
 class State(object):
     def __init__(self):
@@ -1957,28 +2038,28 @@ class State(object):
             channel.init_time_range(self.last_time)
             channel.sort_time_range()
 
-    def print_processor_stats(self):
+    def print_processor_stats(self, verbose):
         print('****************************************************')
         print('   PROCESSOR STATS')
         print('****************************************************')
         for proc in sorted(self.processors.itervalues()):
-            proc.print_stats()
+            proc.print_stats(verbose)
         print
 
-    def print_memory_stats(self):
+    def print_memory_stats(self, verbose):
         print('****************************************************')
         print('   MEMORY STATS')
         print('****************************************************')
         for mem in sorted(self.memories.itervalues()):
-            mem.print_stats()
+            mem.print_stats(verbose)
         print
 
-    def print_channel_stats(self):
+    def print_channel_stats(self, verbose):
         print('****************************************************')
         print('   CHANNEL STATS')
         print('****************************************************')
         for channel in sorted(self.channels.itervalues()):
-            channel.print_stats()
+            channel.print_stats(verbose)
         print
 
     def print_task_stats(self, verbose):
@@ -1990,10 +2071,9 @@ class State(object):
         print
 
     def print_stats(self, verbose):
-        if verbose:
-            self.print_processor_stats()
-            self.print_memory_stats()
-            self.print_channel_stats()
+        self.print_processor_stats(verbose)
+        self.print_memory_stats(verbose)
+        self.print_channel_stats(verbose)
         self.print_task_stats(verbose)
 
     def assign_colors(self):
