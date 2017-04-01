@@ -784,9 +784,6 @@ class Operation(Base):
         self.owner = None
         self.proc = None
 
-    def set_level(self, level):
-        self.level = level
-
     def assign_color(self, color_map):
         assert self.color is None
         if self.kind is None:
@@ -938,9 +935,6 @@ class Task(Operation, TimeRange, HasDependencies, HasWaiters):
         self.color = self.variant.color
         self.base_op.color = self.color
 
-    def set_level(self, level):
-        self.level = level
-
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         return HasWaiters.emit_tsv(self, tsv_file, base_level, max_levels, level)
 
@@ -1021,21 +1015,34 @@ class ProfTask(Base, TimeRange, HasNoDependencies):
     def __repr__(self):
         return 'ProfTask' + (' <{:d}>'.format(self.proftask_id) if self.proftask_id > 0 else '')
 
-class UserMarker(object):
-    def __init__(self, name):
+class UserMarker(Base, TimeRange, HasNoDependencies):
+    def __init__(self, name, start, stop):
+        Base.__init__(self)
+        HasNoDependencies.__init__(self)
+        TimeRange.__init__(self, None, None, start, stop)
         self.name = name
-        self.has_op_id = False
-        self.has_op = False
-        self.is_task = False
-        self.is_meta = False
-        self.create = None
-        self.ready = None
-        self.start = None
-        self.stop = None
+        self.color = '#000000' # Black
+        self.is_task = True
+
+    def get_color(self):
+        return self.color
 
     def get_timing(self):
         return 'total='+str(self.stop - self.start)+' us start='+ \
                 str(self.start)+' us stop='+str(self.stop)+' us'
+
+    def emit_tsv(self, tsv_file, base_level, max_levels, level):
+        tsv_line = data_tsv_str(level = base_level + (max_levels - level),
+                                start = self.start,
+                                end = self.stop,
+                                color = self.get_color(),
+                                opacity = "1.0",
+                                title = repr(self),
+                                initiation = None,
+                                _in = None,
+                                out = None,
+                                prof_uid = self.prof_uid)
+        tsv_file.write(tsv_line)
 
     def __repr__(self):
         return 'User Marker "'+self.name+'"'
@@ -1125,9 +1132,6 @@ class Instance(Base, TimeRange, HasInitiationDependencies):
         self.mem = None
         self.size = None
 
-    def set_level(self, level):
-        self.level = level
-
     def get_unique_tuple(self):
         assert self.mem is not None
         cur_level = self.mem.max_live_copies+1 - self.level
@@ -1204,9 +1208,6 @@ class Message(Base, TimeRange, HasNoDependencies):
     def get_color(self):
         return self.kind.color
 
-    def set_level(self, level):
-        self.level = level
-
     def get_timing(self):
         return 'total='+str(self.stop - self.start)+' us start='+ \
                 str(self.start)+' us stop='+str(self.stop)+' us'
@@ -1256,9 +1257,6 @@ class MapperCall(Base, TimeRange, HasInitiationDependencies):
         TimeRange.__init__(self, None, None, start, stop)
         HasInitiationDependencies.__init__(self, initiation_op)
         self.kind = kind
-
-    def set_level(self, level):
-        self.level = level
 
     def get_color(self):
         assert self.kind is not None and self.kind.color is not None
