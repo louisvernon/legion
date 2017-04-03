@@ -167,11 +167,28 @@ def color_helper(step, num_steps):
 def read_time(string):
     return long(string)/1000
 
+class PathRange(object):
+    def __init__(self, start, stop):
+        assert start <= stop
+        self.start = start
+        self.stop = stop
+    def __cmp__(self, other):
+        return cmp(self.elapsed(), other.elapsed())
+    def elapsed(self):
+        return self.stop - self.start
+    def __repr__(self):
+        return "(" + str(self.start) + "," + str(self.stop) + ")"
+
 class HasDependencies(object):
     def __init__(self):
         self.deps = {"in": set(), "out": set()}
         self.initiation_op = None
         self.initiation = ''
+
+        # for critical path analysis
+        self.path = list()
+        self.path_range = PathRange(0, 0)
+        self.visited = False
     
     def add_initiation_dependencies(self, state, op_dependencies, transitive_map):
         pass
@@ -244,13 +261,6 @@ class TimeRange(object):
         if self.stop < other.stop:
             return 1
         return 0
-
-    def contains(self, other):
-        if self.start <= other.start and \
-            other.stop <= self.stop:
-            return True
-        return False
-
 
     def __repr__(self):
         return "Start: %d us  Stop: %d us  Total: %d us" % (
@@ -464,7 +474,7 @@ class Memory(object):
     def sort_time_range(self):
         self.max_live_instances = 0
         for inst in self.instances:
-            self.time_points.append(TimePoint(inst.create, inst, True))
+            self.time_points.append(TimePoint(inst.start, inst, True))
             self.time_points.append(TimePoint(inst.stop, inst, False))
         # Keep track of which levels are free
         self.time_points.sort(key=lambda p: p.time_key)
@@ -1193,7 +1203,7 @@ class Instance(Base, TimeRange, HasInitiationDependencies):
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
         assert self.level is not None
-        assert self.create is not None
+        assert self.start is not None
         assert self.stop is not None
         inst_name = repr(self)
 
@@ -1201,7 +1211,7 @@ class Instance(Base, TimeRange, HasInitiationDependencies):
         out = json.dumps(self.deps["out"]) if len(self.deps["out"]) > 0 else ""
 
         tsv_line = data_tsv_str(level = base_level + (max_levels - level),
-                                start = self.create,
+                                start = self.start,
                                 end = self.stop,
                                 color = self.get_color(),
                                 opacity = "1.0",
@@ -1213,6 +1223,8 @@ class Instance(Base, TimeRange, HasInitiationDependencies):
 
         tsv_file.write(tsv_line)
 
+    def total_time(self):
+        return self.stop - self.start
 
     def get_color(self):
         # Get the color from the operation
@@ -1539,6 +1551,7 @@ class State(object):
         self.meta_variants = {}
         self.op_kinds = {}
         self.operations = {}
+        self.prof_uid_map = {}
         self.multi_tasks = {}
         self.first_times = {}
         self.last_times = {}
@@ -1550,7 +1563,8 @@ class State(object):
         self.runtime_call_kinds = {}
         self.runtime_calls = {}
         self.instances = {}
-        self.has_spy_state = False
+        self.has_spy_data = False
+        self.spy_state = None
 
     def parse_log_file(self, file_name, verbose):
         skipped = 0
@@ -1560,10 +1574,10 @@ class State(object):
             first_time = 0L
             last_time = 0L
             for line in log:
-                if not self.has_spy_state and \
+                if not self.has_spy_data and \
                     (legion_spy.config_pat.match(line) or \
                      legion_spy.detailed_config_pat.match(line)):
-                    self.has_spy_state = True
+                    self.has_spy_data = True
                 matches += 1  
                 m = task_info_pat.match(line)
                 if m is not None:
@@ -1814,7 +1828,7 @@ class State(object):
         # don't overwrite if we have already captured the (more precise)
         #  timeline info
         if inst.stop is None:
-            inst.create = create
+            inst.start = create
 
     def log_inst_usage(self, op_id, inst_id, mem_id, size):
         op = self.find_op(op_id)
@@ -1827,7 +1841,7 @@ class State(object):
     def log_inst_timeline(self, op_id, inst_id, create, destroy):
         op = self.find_op(op_id)
         inst = self.create_instance(inst_id, op)
-        inst.create = create
+        inst.start = create
         inst.stop = destroy
         if destroy > self.last_time:
             self.last_time = destroy 
@@ -1941,6 +1955,8 @@ class State(object):
             self.last_time = stop
         call = MapperCall(self.mapper_call_kinds[kind],
                           self.find_op(op_id), start, stop)
+        # update prof_uid map
+        self.prof_uid_map[call.prof_uid] = call
         proc = self.find_processor(proc_id)
         proc.add_mapper_call(call)
 
@@ -1999,34 +2015,47 @@ class State(object):
 
     def find_op(self, op_id):
         if op_id not in self.operations:
-            self.operations[op_id] = Operation(op_id) 
+            op = Operation(op_id) 
+            self.operations[op_id] = op
+            # update prof_uid map
+            self.prof_uid_map[op.prof_uid] = op
         return self.operations[op_id]
 
     def find_task(self, op_id, variant, create=None, ready=None, start=None, stop=None):
-        op = self.find_op(op_id)
+        task = self.find_op(op_id)
         # Upgrade this operation to a task if necessary
-        if not op.is_task:
+        if not task.is_task:
             assert create is not None
             assert ready is not None
             assert start is not None
             assert stop is not None
-            op = Task(variant, op, create, ready, start, stop) 
-            variant.op[op_id] = op
-            self.operations[op_id] = op
+            task = Task(variant, task, create, ready, start, stop) 
+            variant.op[op_id] = task
+            self.operations[op_id] = task
+            # update prof_uid map
+            self.prof_uid_map[task.prof_uid] = task
         else:
-            assert op.variant == variant
-        return op
+            assert task.variant == variant
+        return task
 
     def create_meta(self, variant, op, create, ready, start, stop):
-        result = MetaTask(variant, op, create, ready, start, stop)
-        variant.op[op.op_id] = result
-        return result
+        meta = MetaTask(variant, op, create, ready, start, stop)
+        variant.op[op.op_id] = meta
+        # update prof_uid map
+        self.prof_uid_map[meta.prof_uid] = meta
+        return meta
 
     def create_copy(self, src, dst, op, size, create, ready, start, stop):
-        return Copy(src, dst, op, size, create, ready, start, stop)
+        copy = Copy(src, dst, op, size, create, ready, start, stop)
+        # update prof_uid map
+        self.prof_uid_map[copy.prof_uid] = copy
+        return copy
 
     def create_fill(self, dst, op, create, ready, start, stop):
-        return Fill(dst, op, create, ready, start, stop)
+        fill = Fill(dst, op, create, ready, start, stop)
+        # update prof_uid map
+        self.prof_uid_map[fill.prof_uid] = fill
+        return fill
 
     def create_instance(self, inst_id, op):
         # neither instance id nor op id are unique on their own
@@ -2034,12 +2063,17 @@ class State(object):
         if key not in self.instances:
             inst = Instance(inst_id, op)
             self.instances[key] = inst
+            # update prof_uid map
+            self.prof_uid_map[inst.prof_uid] = inst
         else:
             inst = self.instances[key]
         return inst
 
     def create_user_marker(self, name):
-        return UserMarker(name)
+        user = UserMarker(name)
+        # update prof_uid map
+        self.prof_uid_map[user.prof_uid] = user
+        return user
 
     def build_time_ranges(self):
         assert self.last_time is not None 
@@ -2383,21 +2417,21 @@ class State(object):
     # Here, we read the legion spy data! We will use this to draw dependency
     # lines in the prof
     def get_op_dependencies(self, file_names):
-        spy_state = legion_spy.State(False, True, True, True)
+        self.spy_state = legion_spy.State(False, True, True, True)
 
         total_matches = 0
 
         for file_name in file_names:
-            total_matches += spy_state.parse_log_file(file_name)
+            total_matches += self.spy_state.parse_log_file(file_name)
         print('Matched %d lines across all files.' % total_matches)
         op_dependencies = {}
 
         # compute the slice_index, slice_slice, and point_slice dependencies
         # (which legion_spy throws away). We just need to copy this data over
         # before legion spy throws it away
-        for _slice, index in spy_state.slice_index.iteritems():
-            while _slice in spy_state.slice_slice:
-                _slice = spy_state.slice_slice[_slice]
+        for _slice, index in self.spy_state.slice_index.iteritems():
+            while _slice in self.spy_state.slice_slice:
+                _slice = self.spy_state.slice_slice[_slice]
             if index.uid not in op_dependencies:
                 op_dependencies[index.uid] = {"in": set(), "out": set()}
             if _slice not in op_dependencies:
@@ -2405,7 +2439,7 @@ class State(object):
             op_dependencies[index.uid]["out"].add(_slice)
             op_dependencies[_slice]["in"].add(index.uid)
 
-        for _slice1, _slice2 in spy_state.slice_slice.iteritems():
+        for _slice1, _slice2 in self.spy_state.slice_slice.iteritems():
             if _slice1 not in op_dependencies:
                 op_dependencies[_slice1] = {"in": set(), "out": set()}
             if _slice2 not in op_dependencies:
@@ -2413,9 +2447,9 @@ class State(object):
             op_dependencies[_slice1]["out"].add(_slice2)
             op_dependencies[_slice2]["in"].add(_slice1)
 
-        for point, _slice in spy_state.point_slice.iteritems():
-            while _slice in spy_state.slice_slice:
-                _slice = spy_state.slice_slice[_slice]
+        for point, _slice in self.spy_state.point_slice.iteritems():
+            while _slice in self.spy_state.slice_slice:
+                _slice = self.spy_state.slice_slice[_slice]
             if _slice not in op_dependencies:
                 op_dependencies[_slice] = {"in": set(), "out": set()}
             if point.op.uid not in op_dependencies:
@@ -2424,13 +2458,13 @@ class State(object):
             op_dependencies[point.op.uid]["in"].add(_slice)
 
         # don't simplify graphs
-        spy_state.post_parse(False, True)
+        self.spy_state.post_parse(False, True)
 
         print("Performing physical analysis...")
-        # don't perform any checks (too slow!)
-        spy_state.perform_physical_analysis(False, False)
+        self.spy_state.perform_physical_analysis(False, False)
+        self.spy_state.simplify_physical_graph(need_cycle_check=False)
 
-        op = spy_state.get_operation(spy_state.top_level_uid)
+        op = self.spy_state.get_operation(self.spy_state.top_level_uid)
         elevate = dict()
         all_nodes = set()
         printer = legion_spy.GraphPrinter("./", "temp")
@@ -2478,9 +2512,49 @@ class State(object):
         for proc in self.processors.itervalues():
             proc.add_initiation_dependencies(state, op_dependencies, transitive_map)
 
-    def attach_dependencies(self, state, op_dependencies, transitive_map):
+    def attach_dependencies(self, op_dependencies, transitive_map):
         for proc in self.processors.itervalues():
-            proc.attach_dependencies(state, op_dependencies, transitive_map)
+            proc.attach_dependencies(self, op_dependencies, transitive_map)
+
+
+    def traverse_op_for_critical_path(self, op):
+        paths = list()
+        cur_path = list()
+        cur_path_range = PathRange(0, 0)
+        if isinstance(op, HasDependencies):
+            if op.visited:
+                cur_path, cur_path_range = op.path, op.path_range
+            else:
+                for op_tuple in op.deps["out"]:
+                    out_op = self.prof_uid_map[op_tuple[2]]
+                    path, path_range = self.traverse_op_for_critical_path(out_op)
+                    paths.append((path, path_range))
+                if len(paths) > 0:
+                    cur_path, cur_path_range = max(paths, key=lambda p: p[1])
+                    cur_path.append(op)
+                    op.path = cur_path
+                    start = min(cur_path_range.start, op.start)
+                    stop = max(cur_path_range.stop, op.stop)
+                    op.path_range = PathRange(start, stop)
+                    print("Op: " + str(op) + " Path: " + str(op.path) + " Path Range: " + str(op.path_range) + " Elapsed: " + str(op.path_range.elapsed()))
+                else:
+                    op.path = [op]
+                    op.path_range = PathRange(op.start, op.stop)
+
+                cur_path, cur_path_range = op.path, op.path_range
+
+            op.visited = True
+        return cur_path, cur_path_range
+
+    def compute_critical_path(self):
+        paths = []
+        for proc in self.processors.itervalues():
+            for task in proc.tasks:
+                path, path_range = self.traverse_op_for_critical_path(task)
+                paths.append((path, path_range))
+        critical_path, critical_range  = max(paths, key=lambda p: p[1])
+        critical_path.reverse()
+        return critical_path, critical_range
 
 
     def emit_interactive_visualization(self, output_dirname, show_procs,
@@ -2528,7 +2602,7 @@ class State(object):
             os.mkdir(json_dir)
         
         op_dependencies, transitive_map = None, None
-        if self.has_spy_state:
+        if self.has_spy_data:
             op_dependencies, transitive_map = self.get_op_dependencies(file_names)
 
         # with open(dep_json_file_name, "w") as dep_json_file:
@@ -2548,13 +2622,13 @@ class State(object):
 
         if show_procs:
             for proc in self.processors.itervalues():
-                if self.has_spy_state and len(proc.tasks) > 0:
+                if self.has_spy_data and len(proc.tasks) > 0:
                     proc.add_initiation_dependencies(self, op_dependencies, transitive_map)
                     self.convert_op_ids_to_tuples(op_dependencies)
 
             for p,proc in sorted(self.processors.iteritems(), key=lambda x: x[1]):
                 if len(proc.tasks) > 0:
-                    if self.has_spy_state:
+                    if self.has_spy_data:
                         proc.attach_dependencies(self, op_dependencies,
                                                  transitive_map)
                     proc_name = slugify("Proc_" + str(hex(p)))
@@ -2602,6 +2676,12 @@ class State(object):
                     mem_list.append(mem)
 
                     last_time = max(last_time, mem.last_time)
+
+        if self.has_spy_data:
+            critical_path, critical_range = self.compute_critical_path()
+            print("Critical path is " + str(critical_range.elapsed()) + "us")
+            print("    " + (" -> ".join(map(str, critical_path))))
+
 
         processor_tsv_file = open(processor_tsv_file_name, "w")
         processor_tsv_file.write("full_text\ttext\ttsv\tlevels\n")
