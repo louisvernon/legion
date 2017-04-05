@@ -1198,7 +1198,7 @@ class Instance(Base, TimeRange, HasInitiationDependencies):
 
     def get_unique_tuple(self):
         assert self.mem is not None
-        cur_level = self.mem.max_live_copies+1 - self.level
+        cur_level = self.mem.max_live_instances+1 - self.level
         return (str(self.mem), self.prof_uid)
 
     def emit_tsv(self, tsv_file, base_level, max_levels, level):
@@ -2516,33 +2516,31 @@ class State(object):
         for proc in self.processors.itervalues():
             proc.attach_dependencies(self, op_dependencies, transitive_map)
 
-
+    # traverse one op to get the max outbound path from this point
     def traverse_op_for_critical_path(self, op):
-        paths = list()
         cur_path = list()
         cur_path_range = PathRange(0, 0)
         if isinstance(op, HasDependencies):
             if op.visited:
                 cur_path, cur_path_range = op.path, op.path_range
             else:
+                paths = list()
                 for op_tuple in op.deps["out"]:
                     out_op = self.prof_uid_map[op_tuple[2]]
                     path, path_range = self.traverse_op_for_critical_path(out_op)
-                    paths.append((path, path_range))
+                    path.append(op)
+                    start = min(path_range.start, op.start)
+                    stop = max(path_range.stop, op.stop)
+                    paths.append((path, PathRange(start, stop)))
                 if len(paths) > 0:
                     cur_path, cur_path_range = max(paths, key=lambda p: p[1])
-                    cur_path.append(op)
+                    op.path_range = cur_path_range
                     op.path = cur_path
-                    start = min(cur_path_range.start, op.start)
-                    stop = max(cur_path_range.stop, op.stop)
-                    op.path_range = PathRange(start, stop)
-                    print("Op: " + str(op) + " Path: " + str(op.path) + " Path Range: " + str(op.path_range) + " Elapsed: " + str(op.path_range.elapsed()))
                 else:
                     op.path = [op]
                     op.path_range = PathRange(op.start, op.stop)
 
                 cur_path, cur_path_range = op.path, op.path_range
-
             op.visited = True
         return cur_path, cur_path_range
 
@@ -2550,10 +2548,12 @@ class State(object):
         paths = []
         for proc in self.processors.itervalues():
             for task in proc.tasks:
-                path, path_range = self.traverse_op_for_critical_path(task)
-                paths.append((path, path_range))
+                if (len(task.deps["in"]) > 0) or (len(task.deps["out"]) > 0):
+                    path, path_range = self.traverse_op_for_critical_path(task)
+                    paths.append((path, path_range))
         critical_path, critical_range  = max(paths, key=lambda p: p[1])
-        critical_path.reverse()
+        if len(critical_path) > 0:
+            critical_path = map(lambda p: p.get_unique_tuple(), critical_path)
         return critical_path, critical_range
 
 
@@ -2588,6 +2588,7 @@ class State(object):
                                           "legion_prof_data.tsv")
         processor_tsv_file_name = os.path.join(output_dirname, 
                                                "legion_prof_processor.tsv")
+
         scale_json_file_name = os.path.join(output_dirname, "json", 
                                             "scale.json")
         dep_json_file_name = os.path.join(output_dirname, "json", 
@@ -2677,11 +2678,14 @@ class State(object):
 
                     last_time = max(last_time, mem.last_time)
 
+        critical_path = list()
         if self.has_spy_data:
             critical_path, critical_range = self.compute_critical_path()
             print("Critical path is " + str(critical_range.elapsed()) + "us")
-            print("    " + (" -> ".join(map(str, critical_path))))
 
+        critical_path_json_file_name = os.path.join(json_dir, "critical_path.json")
+        with open(critical_path_json_file_name, "w") as critical_path_json_file:
+            json.dump(critical_path, critical_path_json_file)
 
         processor_tsv_file = open(processor_tsv_file_name, "w")
         processor_tsv_file.write("full_text\ttext\ttsv\tlevels\n")
@@ -2788,4 +2792,7 @@ def main():
             state.show_copy_matrix(copy_output_prefix)
 
 if __name__ == '__main__':
+    start = time.time()
     main()
+    end = time.time()
+    print("elapsed: " + str(end - start) + "s")

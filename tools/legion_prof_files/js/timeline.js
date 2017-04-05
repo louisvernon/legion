@@ -544,6 +544,61 @@ function calculateLayout() {
   });
 }
 
+function drawCriticalPath() {
+  state.timelineSvg.select("g.critical_path_lines").remove();
+  if (state.critical_path == undefined || !state.display_critical_path) {
+    return;
+  }
+  state.critical_path.forEach(function(op) {
+    expandElement(op[0], op[1]);
+  });
+  var depGroup = state.timelineSvg.append("g")
+      .attr("class", "critical_path_lines");
+  var prevElem = undefined;
+
+  state.critical_path.forEach(function(op) {
+    var proc = base_map[op[0] + "," + op[1]]; // set in calculateBases
+    if (proc != undefined && proc.visible && proc.enabled && proc.loaded) {
+        var elem = prof_uid_map[op[2]];
+        var level = elem.level;
+        var time = (elem.end - elem.start) / 2 + elem.start;
+        var x = convertToPos(state, time);
+        var endBase = +proc.base;
+        var endLevel = endBase + level;
+        var y = dependencyLineLevelCalculator(endLevel);
+        depGroup.append("circle")
+          .attr("cx", x)
+          .attr("cy", y)
+          .attr("fill", "white")
+          .attr("stroke", "grey")
+          .attr("r", 2.5)
+          .style("stroke-width", "1px");
+        elem.in.concat(elem.out).forEach(function(dep) {
+          if (dep[2] in state.critical_path_prof_uids) {
+            var depElem = prof_uid_map[dep[2]];
+            var depProc = base_map[dep[0] + "," + dep[1]];
+            var depLevel = depElem.level;
+            var depTime = (depElem.end - depElem.start) / 2 + depElem.start;
+            var depX = convertToPos(state, depTime);
+            var depEndBase = +depProc.base;
+            var depEndLevel = depEndBase + depLevel;
+            var depY = dependencyLineLevelCalculator(depEndLevel);
+            depGroup.append("line")
+              .style("stroke", "grey")
+              .attr("x1", depX)
+              .attr("y1", depY)
+              .attr("x2", x)
+              .attr("y2", y)
+              .style("stroke-width", "1px");
+          }
+        });
+        prevElem = elem;
+    } else {
+      prevElem = undefined;
+    }
+  });
+}
+
 function drawDependencies() {
   state.timelineSvg.select("g.dependencies").remove();
   var timelineEvent = state.dependencyEvent;
@@ -570,8 +625,7 @@ function drawDependencies() {
         var level = depElement.level;
         var time = (depElement.end - depElement.start) / 2 + depElement.start;
         var endX = convertToPos(state, time);
-        var endBase = +depProc.base
-        // create a dummy element so we can reuse timelineLevelCalculator
+        var endBase = +depProc.base;
         var endLevel = endBase + level;
         var endY = dependencyLineLevelCalculator(endLevel);
         depGroup.append("line")
@@ -607,11 +661,21 @@ function drawDependencies() {
   }
 }
 
-function timelineEventsExistsAndEqual(a, b) {
+function timelineEventsExistAndEqual(a, b) {
   if (a == undefined || b == undefined) {
     return false;
   }
-  return (a.proc.base == b.proc.base) && (a.id == b.id);
+  return (a.proc.base == b.proc.base) && (a.prof_uid == b.prof_uid);
+}
+
+function timelineElementStrokeCalculator(elem) {
+  if (timelineEventsExistAndEqual(elem, state.dependencyEvent)) {
+    return true;
+  } else if (state.display_critical_path &&
+             elem.prof_uid in state.critical_path_prof_uids) {
+    return true;
+  }
+  return false;
 }
 
 function timelineEventMouseDown(timelineEvent) {
@@ -619,7 +683,7 @@ function timelineEventMouseDown(timelineEvent) {
                          (timelineEvent.out.length != 0));
 
   if (hasDependencies) {
-    if (timelineEventsExistsAndEqual(timelineEvent, state.dependencyEvent)) {
+    if (timelineEventsExistAndEqual(timelineEvent, state.dependencyEvent)) {
       state.dependencyEvent = undefined;
     } else {
       timelineEvent.in.concat(timelineEvent.out).forEach(function(dep) {
@@ -658,14 +722,14 @@ function drawTimeline() {
       return Math.max(constants.min_feature_width, convertToPos(state, d.end - d.start));
     })
     .attr("stroke", function(d) {
-      if (timelineEventsExistsAndEqual(d, state.dependencyEvent)) {
+      if (timelineElementStrokeCalculator(d)) {
         return "red";
       } else {
         return "black";
       }
     })
     .attr("stroke-width", function(d) {
-      if (timelineEventsExistsAndEqual(d, state.dependencyEvent)) {
+      if (timelineElementStrokeCalculator(d)) {
         return "1.5";
       } else {
         return "0.5";
@@ -700,6 +764,7 @@ function redraw() {
     recalculateHeight();
     drawTimeline();
     drawDependencies();
+    drawCriticalPath();
     drawLayout();
   }
 }
@@ -1209,6 +1274,7 @@ function adjustZoom(newZoom, scroll) {
     drawTimeline();
   }
   drawDependencies();
+  drawCriticalPath();
 }
 
 function recalculateHeight() {
@@ -1415,6 +1481,10 @@ function defaultKeydown(e) {
       }
     }
   }
+  else if (commandType == Command.toggle_critical_path) {
+    state.display_critical_path = !state.display_critical_path;
+    redraw();
+  }
   return false;
 }
 
@@ -1556,6 +1626,9 @@ function load_procs(callback) {
       calculateBases();
       drawLayout();
       callback();
+      
+      // TODO: fix
+      load_critical_path();
     }
   );
 }
@@ -1717,6 +1790,16 @@ function load_util(elem) {
   );
 }
 
+function load_critical_path() {
+  $.getJSON("json/critical_path.json", function(json) {
+    state.critical_path = json;
+    state.critical_path_prof_uids = {};
+    state.critical_path.forEach(function(p) { 
+      state.critical_path_prof_uids[p[2]] = 1;
+    });
+  });
+}
+
 function load_data() {
   load_procs(load_ops_and_timeline);
 }
@@ -1746,6 +1829,7 @@ function initializeState() {
   state.searchEnabled = false;
   state.rangeZoom = true;
   state.collapseAll = false;
+  state.display_critical_path = false;
 
   // TODO: change this
   state.x = d3.scale.linear().range([0, state.width]);
